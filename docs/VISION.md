@@ -4,94 +4,119 @@
 
 A native macOS screensaver (`.saver` bundle) that writes proverbs on screen in
 **handwriting** — an invisible pen draws each letter stroke by stroke, letter by
-letter, until the whole proverb stands on screen, holds, then a new random
-proverb begins.
+letter, **in place at its final position**, until the whole proverb stands on
+screen, holds, then a new random proverb begins.
 
 It is the contemplative, non-interactive form of **Glypher**
 (`zap-engine/examples/glypher`), the tracing game where the player writes each
-letter by hand. The screensaver keeps Glypher's soul — the hand-authored glyph
-strokes, the cursive flow between letters, the ink-and-glow aesthetic — and
-removes the player. The machine writes; you watch.
+letter by hand. The screensaver keeps Glypher's full look — the hand-authored
+glyph strokes, the cursive flow between letters, the bump-mapped leather
+background swept by moving lights, the particle celebrations — and removes the
+player. The machine writes; you watch.
+
+**Not the game's practice view** (one giant letter at a time in the center,
+progress text small at the top). The saver writes at the scale of the game's
+*saying-complete* screen: the whole proverb laid out large as a centered
+multi-line block, each letter drawn where it will stay. (Amended 2026-08-11
+from game screenshots + human direction.)
 
 ## What it is NOT
 
 - **Not a port of zap-engine.** No Rust, no WASM, no WebGPU, no web view. The
-  engine is irrelevant to this effect; only the *data* and the *aesthetic*
-  carry over. (Ratified 2026-08-11: stroke-drawn handwriting chosen over a
-  Core Text typewriter precisely because the data ports and the engine doesn't
-  need to.)
-- **Not a generic quote screensaver.** If it rendered text with a font it would
-  not be this product. The letters are *drawn*, along the same stroke paths a
-  player would trace in the game.
-- **Not configurable (v1).** No configure sheet, no options. One saver, one
-  proverb set, one look.
+  *data*, the *aesthetic*, and the *rendering architecture* carry over; the
+  engine does not. The native renderer is adapted from **ZapZap**
+  (`/Users/apple/Documents/Xcodes/ZapZap`, same author) — a proven custom
+  Metal renderer already built for EDR/HDR.
+- **Not a generic quote screensaver.** The letters are *drawn*, along the same
+  stroke paths a player would trace in the game, over the same lit leather.
+- **Not configurable (v1).** No configure sheet, no options.
 - **Not distributed (v1).** Personal use on the author's machine. No signing,
-  no notarization, no universal binary. All three are named extension points,
-  not requirements.
+  no notarization, no universal binary — named extension points only.
 
 ## Source lineage (files of record)
 
 | File | Origin | Contract |
 |------|--------|----------|
-| `data/glyphs_baked.json` | Exported by the zap-engine glyph editor ("Download Baked"), copied 2026-08-11 from `zap-engine/examples/glypher/data/`. | **Generated artifact — never hand-edit.** Changes go through the glyph editor and a re-export. Format: per-character stroke polylines with entry variants (`Baseline`/`High`), exit types, and width classes (0 narrow / 1 standard / 2 wide). Covers exactly `a–z A–Z 0–9` — 62 glyphs, no punctuation, no diacritics. |
-| `data/sayings.json` | Copied 2026-08-11 from the same place. | Flat JSON array of 31 proverbs, authored to be renderable by the 62-glyph set (letters + spaces only). Kept verbatim, including the one French tongue-twister — game parity. Hand-editable: any added proverb must use only covered characters. |
+| `data/glyphs_baked.json` | Exported by the zap-engine glyph editor ("Download Baked"), copied 2026-08-11 from `zap-engine/examples/glypher/data/`. | **Generated artifact — never hand-edit.** Per-character stroke polylines of evenly-spaced points, entry variants (`Baseline`/`High`), exit types, width classes (0 narrow / 1 standard / 2 wide). Covers exactly `a–z A–Z 0–9` — 62 glyphs, no punctuation, no diacritics. |
+| `data/sayings.json` | Same origin. | Flat JSON array of 31 proverbs authored for the 62-glyph set (letters + spaces only). Verbatim, game parity. Hand-editable; additions must use only covered characters. |
+| `assets/vbg_1024.jpg` + `assets/vbg_1024_normals.png` | Copied 2026-08-11 from `zap-engine/examples/glypher/public/assets/` (per its `assets.json`: the single background atlas + its normal map). | The bump-mapped leather background. Generated art assets — replaced, never edited. |
+| Renderer donor | `ZapZap Shared/` — `Renderer.swift`, `Shaders.metal`, `ParticleEffects.swift`, `Math.swift`, `GraphicsLayer.swift`. | Adapted (copied with provenance headers), not depended on. `.rgba16Float` surface + `extendedLinearDisplayP3` colorspace = EDR-ready. |
 
-The behavioral reference is the game source itself:
-`zap-engine/examples/glypher/src/{glyphs.rs, game.rs}` — variant selection,
-width classes, word-gap, and the celebration look are *specified by that code*,
-not by memory of it. Key facts, verified 2026-08-11:
+## Behavioral reference — verified facts (2026-08-11, from source)
+
+From `examples/glypher/src/{glyphs.rs, game.rs}`:
 
 - Glyph box: 600 × 480 units; width classes scale box width ×0.5 / ×1.0 / ×1.3.
 - Word gap: 0.5 × a standard character advance. Spaces are gaps, not glyphs.
-- Cursive variant rule: lowercase letters have `Baseline` and `High` entry
-  variants; the *previous* letter's exit type picks the entry
-  (`glyphs.rs::variant_for`). High-exit letters: `b o v w`. Override: at word
-  start, `m n v w` use `High` (`game.rs::effective_variant`).
-- Pen speed in the game: `GUIDE_SPEED = 60` world-units/s in an 800×600 world.
-- Ink colors are HDR-ish values that rely on the engine's bloom
-  (traced ink `(0.2, 2.5, 0.5)`, gold completion pulse `(8t, 6.8t, 2.4t)` with
-  stroke width animating 8→20). The saver must *translate* this look to plain
-  CoreGraphics, not copy the numbers.
+- Cursive variant rule: previous letter's exit (`Baseline`/`High`) picks the
+  lowercase entry variant (`glyphs.rs::variant_for`); high-exit letters are
+  `b o v w`; at word start `m n v w` use `High` (`game.rs::effective_variant`).
+- Pen pacing: `GUIDE_SPEED = 60` **path points per second** (stroke points are
+  evenly spaced — speed is effectively arc-length-constant per stroke).
+- Lights (the game's inventory, `game.rs`):
+  - moving guide light along the stroke: color `[0.5, 0.7, 1.0]`,
+    intensity 3.0, radius 280 — this is what sweeps the leather;
+  - green drawing light at the pen: `[0.3, 1.0, 0.4]`, 4.0, 250;
+  - faint ambient at the letter: `[0.3, 0.3, 0.4]`, 4.0, 350;
+  - letter-complete gold flood: strokes redrawn gold
+    `(8t, 6.8t, 2.4t)` width 8→20 over 1.2 s + gold light
+    `[1.0, 0.85, 0.3]`, intensity 14·t, radius 350;
+  - saying-complete: central gold light `[1.0, 0.85, 0.3]`, 10·t, radius 400,
+    over a 12 s dwell.
+- Particles: letter completion spawns **25 particles** at the glyph center
+  (speed 15, size 5, lifetime 1.5 s) — `game.rs` `spawn_particles`.
+- Rendering architecture (from `zap-web/src/renderer/lighting.wgsl` +
+  `composite.wgsl`): **lighting is a fullscreen post-process** — the scene
+  (background sprite + vector strokes) is composed into a color buffer with a
+  parallel normal buffer, then point lights with per-pixel normal-mapped
+  shading and quadratic falloff `(1 − d/r)²` multiply the whole frame. Ink is
+  lit by the same pass — that is why the leather relief shows through the
+  strokes. **There is no bloom pass**; the glow is the lights themselves.
+- The web engine's intermediate buffers are `rgba8unorm` — HDR-ish colors
+  clamp. ZapZap's native pipeline (`rgba16Float`, extended linear P3) does
+  not; the saver can match or exceed the web game's fidelity.
 
-## Experience (the ratified behavior)
+## Experience (ratified behavior, amended 2026-08-11)
 
-1. Screen goes dark (near-black background, as in the game).
-2. A random proverb is picked (no immediate repeat of the previous one).
-3. The proverb is laid out as a centered block, wrapped to lines by word,
-   using the glyph width classes.
-4. An invisible pen writes it: letter by letter, each letter stroke by stroke
-   in authored stroke order, the pen tip moving at constant speed along each
-   path. Completed letters stay as settled ink.
-5. Each completed letter gets a brief gold pulse (the game's celebration,
-   translated to SDR).
-6. When the proverb is complete, it holds on screen (order of ~10 s, matching
-   the game's 12 s saying-celebration dwell), then fades and the next proverb
-   begins.
-7. Runs identically on every attached screen and, scaled down, in the System
-   Settings preview.
+1. The bump-mapped leather background, near-dark, ambient-lit.
+2. A random proverb is picked (no immediate repeat).
+3. The proverb is laid out as a large centered multi-line block — the
+   saying-complete screen's scale — wrapped by word using glyph width classes.
+4. An invisible pen writes it in place: letter by letter, stroke by stroke in
+   authored order, pen tip moving at constant arc-length speed. **The pen
+   carries the light**: the guide/drawing lights sweep the leather as it
+   writes. Completed letters stay as settled green ink.
+5. Each completed letter: gold flood on its strokes + a particle burst +
+   gold light pulse (the game's letter celebration, 1.2 s).
+6. Proverb complete: central gold dwell light (~12 s hold), then fade, next
+   proverb.
+7. Identical on every attached screen; scaled down in System Settings preview.
+8. EDR: the surface is EDR-capable; on this machine's panel (verified
+   `maximumPotentialEDR = 1.0`) output is tone-limited SDR today — an XDR
+   display gets real headroom with no code change.
 
 ## Constraints
 
-1. **Self-contained bundle.** Everything the saver needs (code, both JSON
-   files) lives inside `GlyphSaver.saver`. No network, no reads outside the
-   bundle, no writes anywhere.
-2. **Core stays headless.** Glyph model, layout, and the writing timeline are
-   pure Swift (Foundation + CoreGraphics types only — no AppKit, no
-   ScreenSaver framework) and are exercised by `swift test` without a GUI
-   host. Only the thin view layer touches ScreenSaver/AppKit.
-3. **Files are the system of record.** The repo's tracked files fully
-   determine the built saver. No generated state outside `build/`.
-4. **Name honesty.** Identifiers ported from the game keep the game's
-   verified semantics or get renamed to match what they actually do here.
+1. **Self-contained bundle.** Code, both JSONs, both textures, shader source —
+   all inside `GlyphSaver.saver`. No network, no reads outside the bundle, no
+   writes anywhere. Shaders compile at runtime (`makeLibrary(source:)`) — no
+   Metal toolchain dependency at build time.
+2. **Core stays headless.** Glyph model, layout, writing timeline: pure Swift
+   (Foundation + CoreGraphics value types only — no AppKit, no ScreenSaver,
+   no Metal), exercised by `swift test`. Only the render layer touches
+   Metal/AppKit/ScreenSaver.
+3. **Files are the system of record.** Tracked files fully determine the
+   built saver. No generated state outside `build/`.
+4. **Name honesty.** Ported identifiers keep verified semantics or are
+   renamed to match actual behavior.
 
 ## Named extension points (deferred, not designed for)
 
-- **GS-RO — Romanian proverbs.** Requires authoring `ă â î ș ț` (and any
-  punctuation) in the zap-engine glyph editor and re-exporting
-  `glyphs_baked.json`. This is a human authoring session, not agent work.
-  Ratified 2026-08-11: v1 is English-only; diacritic stripping was rejected as
-  a rendered defect.
+- **GS-RO — Romanian proverbs.** Requires authoring `ă â î ș ț` (+
+  punctuation) in the zap-engine glyph editor and re-export. Human authoring
+  session. Ratified 2026-08-11: v1 English-only; diacritic stripping rejected.
+- **XDR display.** Pipeline is EDR-ready; nothing to build until the hardware
+  exists.
 - **Universal binary / distribution.** `lipo` + codesign + notarize when the
-  saver leaves this machine. Trivial build-script extension; not before then.
-- **Configure sheet.** Only if a real second user or a real second preference
-  appears.
+  saver leaves this machine.
+- **Configure sheet.** Only if a real second user or preference appears.
