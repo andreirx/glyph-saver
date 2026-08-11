@@ -82,6 +82,14 @@ From `examples/glypher/src/{glyphs.rs, game.rs}`:
 2. A random proverb is picked (no immediate repeat).
 3. The proverb is laid out as a large centered multi-line block — the
    saying-complete screen's scale — wrapped by word using glyph width classes.
+   The layout is fixed; **the camera moves over it** (amended 2026-08-11):
+   writing opens framed tight on the first letter — one huge letter filling
+   the screen — and as letters complete, the camera **slowly, monotonically
+   zooms out** to keep everything written plus the active letter in frame,
+   converging exactly to the full boxed multi-line framing by the last
+   letter. The leather is screen-fixed (the camera transforms ink, pen, and
+   lights only — world-attached leather would magnify to blur, and the game
+   treats the background as screen-space).
 4. An invisible pen writes it in place: letter by letter, stroke by stroke in
    authored order, pen tip moving at constant arc-length speed. **The pen
    carries the light**: the guide/drawing lights sweep the leather as it

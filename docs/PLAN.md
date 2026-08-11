@@ -73,6 +73,11 @@ GlyphCore  (SPM library — pure Swift, Foundation + CG value types only)
   WritingClock   pure timeline: elapsed → inked strokes, active stroke, pen
                  arc-length position, celebration timers, phase
                  (writing | letterCelebrate | holding | fading), next-pick
+  CameraPlan     pure viewport: (inked + active letter bboxes) → padded
+                 union target frame, exponentially smoothed; starts framed
+                 on the first letter's box, monotonically zooms out, ends
+                 exactly at the full-block framing. World→screen transform
+                 applied to ink/pen/lights; background is screen-fixed.
 
 Render layer  (Sources/Saver/ — Metal + AppKit + ScreenSaver, NOT under test)
   GlyphSaverView   ScreenSaverView hosting the CAMetalLayer, drives
@@ -112,6 +117,22 @@ glyph-saver/
 3. The slice's named **output surface** demonstrably renders (operator
    installs and looks). Deep-vertical rule: no dormant capability.
 
+## Test hosts (one engine, two shells — decided 2026-08-11)
+
+The renderer + core are host-agnostic; only the CAMetalLayer's owner varies:
+- **Saver host** (`GlyphSaverView`) — the product; exercised by
+  `scripts/smoke.sh` through the REAL path (install → defaults → launch
+  `ScreenSaverEngine` → `screencapture` ×2 → frames must differ). This is
+  the acceptance surface.
+- **Preview app host** (`Sources/PreviewApp/main.swift`, tracked; built by
+  `scripts/preview.sh` into `build/`) — the same renderer in an NSWindow
+  for live watching and fast screenshot iteration. A dev tool, never
+  shipped in the bundle, and never a substitute for the smoke gate (cycle-0
+  lesson: the builder's improvised harness proved the need; the reviewer
+  correctly rejected it as acceptance evidence).
+Install stays per-user (`~/Library/Screen Savers`); `/Library/Screen
+Savers` (all users) only when a real need appears.
+
 ## Slices
 
 Ordering is riskiest-substrate-first: the saver-bundle + Metal-in-
@@ -141,6 +162,9 @@ riskiest substrate, before any glyph work).
   tests: variant-rule oracle from VISION, advance/wrap arithmetic, and the
   coverage property — every character of all 31 sayings resolves to an
   existing glyph variant.
+- Promote the preview app host to tracked code
+  (`Sources/PreviewApp/main.swift` + `scripts/preview.sh` — see Test
+  hosts), replacing the cycle-0 improvised harness.
 - Ribbon tessellation in the render layer: round joins + round caps,
   uniform width, opaque cream (constants above); one full proverb rendered
   as settled ink over the GS-1 background, lit by the ambient. Overlap
@@ -157,10 +181,17 @@ the winning-screen scale over the living background.
   authored order, letters in reading order; phases writing → holding
   (~12 s) → fading → next proverb (uniform random, no immediate repeat).
   Tests: phase transitions, monotonic ink progress, no-repeat.
+- `CameraPlan` (amended 2026-08-11): opens framed on the first letter's
+  glyph box (~65% of screen height), target = padded union bbox of inked +
+  active letter, exponential smoothing (~1 s time constant), ends at the
+  full-block framing. Tests: zoom-out monotonic, active letter always in
+  frame, final frame equals the GS-2 static framing.
 - Render: partial-stroke ribbons up to pen position; pen tip dot; the pen
-  carries the guide + green lights along the actual stroke path.
+  carries the guide + green lights along the actual stroke path; camera
+  transform applied to ink/pen/lights, leather screen-fixed.
 
-Output surface: the saver writes proverbs in place, letter by letter — the
+Output surface: the saver writes proverbs in place, letter by letter, the
+camera pulling back from one huge letter to the full boxed proverb — the
 product's defining behavior, watchable.
 
 ### GS-4 — Celebrations & parity (PROTOTYPE → MATURE on approval)
