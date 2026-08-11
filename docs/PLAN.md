@@ -34,10 +34,16 @@ particles, or EDR. **Metal**, adapting the **ZapZap** donor
   `lighting.wgsl`/`composite.wgsl`):
   1. **Scene pass** → offscreen color buffer: background quad
      (`vbg_1024.jpg`) + ink strokes as tessellated triangle-strip ribbons
-     (polyline → ribbon in the render layer). A parallel **normal buffer**
-     holds the background's normal map; strokes do NOT write normals — the
-     leather relief deliberately shows through the ink (verified engine
-     behavior).
+     (polyline → ribbon in the render layer) — **Hello-style strokes**
+     (amended 2026-08-11): thick, uniform width, round caps, round joins,
+     opaque warm cream. Starting constants (tune at checkpoints): width 36
+     glyph units (~7.5% of the 480-unit glyph box; the game's 6-unit guide
+     line is NOT the reference — the macOS Hello saver is), color ≈
+     (0.95, 0.91, 0.82). Opaque because cursive loops self-overlap and only
+     opaque ink crosses cleanly. A parallel **normal buffer** holds the
+     background's normal map; strokes do NOT write normals — the leather
+     relief deliberately shows through via the lighting pass (verified
+     engine behavior).
   2. **Lighting pass** (fullscreen): port of `lighting.wgsl` to MSL — point
      lights, per-pixel normal shading, quadratic falloff `(1 − d/r)²`,
      multiplied over the whole scene (ink included).
@@ -135,11 +141,14 @@ riskiest substrate, before any glyph work).
   tests: variant-rule oracle from VISION, advance/wrap arithmetic, and the
   coverage property — every character of all 31 sayings resolves to an
   existing glyph variant.
-- Ribbon tessellation in the render layer; one full proverb rendered as
-  settled green ink over the GS-1 background, lit by the ambient.
+- Ribbon tessellation in the render layer: round joins + round caps,
+  uniform width, opaque cream (constants above); one full proverb rendered
+  as settled ink over the GS-1 background, lit by the ambient. Overlap
+  correctness (loops in e/o/l cross without artifacts) is part of the
+  slice's visual acceptance.
 
-Output surface: any proverb, statically complete, at the winning-screen
-scale over the living background.
+Output surface: any proverb, statically complete, Hello-style fat ink at
+the winning-screen scale over the living background.
 
 ### GS-3 — The writing (PROTOTYPE → MATURE on approval)
 

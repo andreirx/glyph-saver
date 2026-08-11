@@ -85,9 +85,18 @@ From `examples/glypher/src/{glyphs.rs, game.rs}`:
 4. An invisible pen writes it in place: letter by letter, stroke by stroke in
    authored order, pen tip moving at constant arc-length speed. **The pen
    carries the light**: the guide/drawing lights sweep the leather as it
-   writes. Completed letters stay as settled green ink.
+   writes. **The ink is Hello-style** (amended 2026-08-11, after the macOS
+   "Hello" screensaver): a thick, uniform-width, round-capped, round-joined,
+   **opaque warm-cream** stroke — a fat pen, not the game's thin glow line.
+   Opacity is load-bearing: cursive loops self-overlap, and only opaque ink
+   overlaps cleanly (translucent glow would double-brighten at crossings).
+   The lighting pass still shades the ink, so the scene stays one world.
+   Completed letters stay as settled cream ink.
 5. Each completed letter: gold flood on its strokes + a particle burst +
-   gold light pulse (the game's letter celebration, 1.2 s).
+   gold light pulse (the game's letter celebration, 1.2 s). Gold against
+   cream ink is the chosen contrast (ratified 2026-08-11). The game's green
+   pen light may be tuned warm to match the cream ink — operator latitude
+   at checkpoints, not a re-ratification.
 6. Proverb complete: central gold dwell light (~12 s hold), then fade, next
    proverb.
 7. Identical on every attached screen; scaled down in System Settings preview.
