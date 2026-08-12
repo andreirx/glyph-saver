@@ -179,6 +179,9 @@ riskiest substrate, before any glyph work).
 - Promote the preview app host to tracked code
   (`Sources/PreviewApp/main.swift` + `scripts/preview.sh` — see Test
   hosts), replacing the cycle-0 improvised harness.
+- Ship `thumbnail.png`/`thumbnail@2x.png` in Resources (the Settings grid
+  shows a static bundle asset, never a live render — GS-1 field finding);
+  generate from a rendered frame via `sips` so the tile is brand-true.
 - Ribbon tessellation in the render layer: round joins + round caps,
   uniform width, opaque cream (constants above); one full proverb rendered
   as settled ink over the GS-1 background, lit by the ambient. Overlap
