@@ -82,28 +82,40 @@ fragment float4 scene_fragment(VSOut in [[stage_in]],
     return leather.sample(samp, uv);
 }
 
-// ---- Ink pass: opaque Hello-style cream ribbons drawn INTO the scene color
-// buffer AFTER the leather and BEFORE lighting (slice GS-2). The render layer
+// ---- Ink pass: Hello-style cream ribbons drawn INTO the scene color buffer
+// AFTER the leather and BEFORE lighting (slice GS-2). The render layer
 // tessellates each glyph polyline into round-capped/round-joined triangles in
-// WORLD coords (y-down, [0, projSize]); this maps them to clip space. Strokes
-// write COLOR ONLY — never normals — so the leather relief shows through the
-// ink via the lighting pass (verified engine behavior, VISION §4). Opaque, so
-// self-overlapping cursive loops (e/o/l) compose without double-brightening.
+// WORLD coords (y-down); GS-3 draws each partial-inked stroke up to the pen and
+// a bright pen-tip dot. Strokes write COLOR ONLY — never normals — so the
+// leather relief shows through the ink via the lighting pass (verified engine
+// behavior, VISION §4). Cream ink is opaque (alpha 1) so self-overlapping
+// cursive loops (e/o/l) compose without double-brightening; the 1 s proverb
+// FADE (GS-3) lowers alpha to dissolve the ink back into the leather via the
+// pipeline's alpha blend.
+//
+// GS-3 CAMERA (VISION §3, ratified): the pen carries the writing; the camera
+// pulls back from one huge letter to the full block. The transform is applied
+// HERE, to ink/pen only — leather (scene pass) and the lighting pass stay
+// screen-fixed. view = (world − focus)·scale + projSize/2.
 struct InkUniforms {
     float2 projSize;   // world proj size (matches LightingUniforms.projsize_fill.xy)
+    float2 focus;      // world point mapped to the view centre (CameraPlan)
+    float  scale;      // uniform world→view magnification (CameraPlan)
+    float  _pad;
 };
 
 vertex float4 ink_vertex(uint vid [[vertex_id]],
                          device const float2 *positions [[buffer(0)]],
                          constant InkUniforms &u [[buffer(1)]]) {
     float2 w = positions[vid];
-    float2 uv = w / u.projSize;                 // y-down [0,1], same as lighting world_pos
+    float2 view = (w - u.focus) * u.scale + u.projSize * 0.5;   // apply camera
+    float2 uv = view / u.projSize;               // y-down [0,1], same as lighting world_pos
     float2 clip = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);   // y-down world → y-up clip
     return float4(clip, 0.0, 1.0);
 }
 
 fragment float4 ink_fragment(constant float4 &color [[buffer(0)]]) {
-    return color;   // opaque cream; lit by the following lighting pass
+    return color;   // cream (or bright pen dot); lit by the following lighting pass
 }
 
 // ---- Lighting pass: port of lighting.wgsl fs_lighting (L52–93).

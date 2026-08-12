@@ -92,15 +92,18 @@ int main(int argc, const char **argv) {
         if (![view respondsToSelector:@selector(renderVerificationFrameAtTime:)])
             return fail(@"view does not respond to renderVerificationFrameAtTime:");
 
+        // GS-3: t=2 s (early writing, camera zoomed IN on one huge letter) vs
+        // t=25 s (later — camera pulled back / further into the proverb). The
+        // schedule is a deterministic function of time, so these are stable.
         CGImageRef img1 = [view renderVerificationFrameAtTime:2.0];
         if (img1 == NULL) return fail(@"frame 1 render returned NULL");
         if (!writePNG(img1, out1)) return fail([NSString stringWithFormat:@"writing %@ failed", out1]);
 
-        CGImageRef img2 = [view renderVerificationFrameAtTime:7.0];
+        CGImageRef img2 = [view renderVerificationFrameAtTime:25.0];
         if (img2 == NULL) return fail(@"frame 2 render returned NULL");
         if (!writePNG(img2, out2)) return fail([NSString stringWithFormat:@"writing %@ failed", out2]);
 
-        fprintf(stdout, "RENDER OK: wrote %s and %s (t=2.0s, t=7.0s)\n",
+        fprintf(stdout, "RENDER OK: wrote %s and %s (t=2.0s, t=25.0s)\n",
                 out1.UTF8String, out2.UTF8String);
         return 0;
     }

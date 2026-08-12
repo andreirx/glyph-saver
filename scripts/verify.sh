@@ -12,9 +12,11 @@
 #   (b) LOADTEST — Bundle(path:)-load the INSTALLED bundle, resolve the
 #       principal class, and instantiate it via -initWithFrame:isPreview:
 #       (the engine's exact dyld/class/init path), all in scripts/verify_host.m;
-#   (c) render >=2 frames a few animation-seconds apart THROUGH the real
-#       GlyphSaverView instance (its @objc verification seam) into build/*.png;
-#   (d) fail if the two frames are byte-identical (the light must have moved).
+#   (c) render 2 frames that STRADDLE the writing behavior THROUGH the real
+#       GlyphSaverView instance (its @objc verification seam) into build/*.png:
+#       t=2 s (early writing — camera zoomed in on one huge letter) and
+#       t=25 s (later — pen further along / camera pulled back);
+#   (d) fail if the two frames are byte-identical (the writing/zoom must change).
 #
 # Exit nonzero on any failure; the operator then judges the two PNGs and the
 # installed saver in System Settings preview (the surfaces automation cannot
@@ -58,9 +60,9 @@ if [[ ! -s "$OUT1" || ! -s "$OUT2" ]]; then
 	exit 1
 fi
 
-echo "==> (d) Assert the two frames differ (moving guide light)"
+echo "==> (d) Assert the two frames differ (writing progressed / camera moved)"
 if cmp -s "$OUT1" "$OUT2"; then
-	echo "VERIFY FAILED: $OUT1 and $OUT2 are byte-identical — the light did not move" >&2
+	echo "VERIFY FAILED: $OUT1 and $OUT2 are byte-identical — the writing did not advance" >&2
 	exit 1
 fi
 

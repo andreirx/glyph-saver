@@ -1,6 +1,6 @@
 //
 //  ZapRenderer.swift — Metal renderer for Glyph Saver
-//  Module maturity: PROTOTYPE (slice GS-1)
+//  Module maturity: PROTOTYPE (slice GS-3)
 //
 //  PROVENANCE
 //  ----------
@@ -9,48 +9,53 @@
 //    - Surface format .rgba16Float               ← Renderer.swift:186
 //    - EDR layer setup (extendedLinearDisplayP3, ← GameViewController.swift:32–39
 //      wantsExtendedDynamicRangeContent). Applied on the CAMetalLayer in
-//      GlyphSaverView, not here (the donor uses an MTKView; a screensaver hosts
-//      a bare CAMetalLayer instead).
+//      GlyphSaverView (a screensaver hosts a bare CAMetalLayer, not an MTKView).
 //    - Linear sampler (min/mag linear)           ← Renderer.swift:188–195
 //  DROPPED (donor game code left behind, per PLAN.md "adapt, don't wrap"):
-//    the Screen/GraphicsLayer/mesh/button/tutorial/sound machinery. This slice
-//    needs only two fullscreen passes.
+//    the Screen/GraphicsLayer/mesh/button/tutorial/sound machinery.
 //
 //  The two-pass structure (offscreen scene color → fullscreen lighting) ports
 //  the zap-web pipeline verified in VISION.md: lighting is a fullscreen
-//  post-process that multiplies over the composed scene. GS-2 draws ink-stroke
-//  ribbons into the scene color buffer; that ratified near-term requirement is
-//  why the scene target is already separate from the drawable here.
+//  post-process that multiplies over the composed scene.
 //
-//  GS-2 additions:
-//    - Ink: the fixed proverb is laid out by GlyphCore.ProverbLayout (pure,
-//      tested) into world-space stroke polylines, tessellated here into
-//      round-capped/round-joined opaque-cream geometry, and drawn into the
-//      scene color buffer after the leather (before lighting). The ribbon
-//      tessellation adapts the ZapZap donor SegmentStripeMesh.swift pattern
-//      (perpendicular half-width offset per segment) but replaces its
-//      miter/square joins with a CAPSULE UNION (segment quad + a round disc at
-//      every vertex) — round joins + round caps in one pass, artifact-free for
-//      opaque ink that self-overlaps (cursive loops). Provenance: donor
-//      SegmentStripeMesh.swift:88–183; deviation is the join/cap method.
-//      EMISSION (GS-2 review-0 required change): every convex piece (each
-//      segment quad, each disc) is emitted in TRIANGLE-STRIP vertex order
-//      (a two-pointer zig-zag that strip-triangulates a convex polygon), and
-//      the pieces are joined into ONE connected strip by degenerate bridges
-//      (last-vertex-of-prev + first-vertex-of-next repeated). Drawn with a
-//      single `.triangleStrip` primitive. Degenerate (zero-area) triangles
-//      never rasterize; the ink pipeline sets no cull mode (default `.none`),
-//      so strip winding parity is irrelevant to the opaque fill.
+//  GS-3 — THE WRITING (this slice)
+//  ------------------------------
+//  An invisible pen writes each proverb letter by letter while the camera pulls
+//  back from one huge letter to the full boxed proverb; hold; fade; next. All of
+//  the *decisions* are pure GlyphCore:
+//    - ProverbSequence  — uniform-random, no-immediate-repeat pick over
+//      sayings.json. Seeded ONCE per renderer instance from system randomness
+//      (each saver session opens on a random proverb — VISION §Experience 2 /
+//      GS-3, NOT a fixed sequence). The seed is fixed FOR THE INSTANCE, so the
+//      schedule stays a deterministic function of absolute time and the renderer
+//      can replay it statelessly from t=0 every frame; the two verify.sh captures
+//      from one host process therefore stay mutually consistent.
+//    - WritingClock     — per-proverb timeline: which strokes are inked, the pen
+//      arc-length position (GUIDE_SPEED = 60 pts/s, game.rs:26), and the phase
+//      writing → holding (12 s, SAYING_CELEBRATE_DURATION game.rs:31) →
+//      fading (1 s) → done.
+//    - CameraPlan       — the monotone world→view pull-back (opens on letter 1,
+//      converges to the GS-2 static framing). Applied to INK/PEN/LIGHTS only.
+//  The renderer is pure mechanism: each frame it reconstructs (proverb, local
+//  time) from the absolute time, tessellates the partial-inked ribbons up to the
+//  pen (round cap at the pen), draws the bright pen-tip dot (game.rs:468), and
+//  positions the pen's lights — guide [0.5,0.7,1.0] i3 r280 + green
+//  [0.3,1.0,0.4] i4 r250 (game.rs:463/483) + faint letter ambient
+//  [0.3,0.3,0.4] i4 r350 (game.rs:477) — in VIEW space through the camera. The
+//  leather (scene pass) and the lighting pass stay screen-fixed (VISION §3).
+//  During hold/fade a gentle Lissajous ambient sweep keeps the scene alive.
 //
-//  ABSTRACTION LEDGER (this file adds none): no renderer protocol, no scene
-//  graph, no material system, no mesh class. One concrete renderer, called only
-//  by GlyphSaverView; GlyphCore is the sole (pure) collaborator. Direct
-//  implementation inside the current slice.
+//  ABSTRACTION LEDGER (this file adds none): one concrete renderer, called only
+//  by GlyphSaverView; GlyphCore is the sole (pure) collaborator. The ink
+//  vertex buffer is now rebuilt PER FRAME (partial strokes change every frame);
+//  layouts are cached per (proverb index, world size) so only the cheap
+//  WritingClock and the tessellation recompute each frame.
 //
 
 import Metal
 import MetalKit
 import QuartzCore
+import CoreGraphics
 import simd
 
 // GPU mirrors — field order/size MUST match the MSL structs in Shaders.metal.
@@ -73,25 +78,45 @@ private struct LightingUniformsGPU {
     var projSizeFill: SIMD4<Float> = .zero
 }
 
-/// Mirror of MSL `InkUniforms` (one float2).
+/// Mirror of MSL `InkUniforms` (float2 projSize, float2 focus, float scale,
+/// float pad → 24 bytes). GS-3 adds the camera (focus + scale).
 private struct InkUniformsGPU {
     var projSize: SIMD2<Float> = .zero
+    var focus: SIMD2<Float> = .zero
+    var scale: Float = 1
+    var pad: Float = 0
 }
 
 final class ZapRenderer {
     // Verified game facts (docs/VISION.md, ../zap-engine/examples/glypher/src).
     private static let worldHeight: Float = 600.0                 // game.rs:12 WORLD_H
     private static let ambient = SIMD3<Float>(0.12, 0.11, 0.10)   // VISION near-dark ambient
-    private static let guideColor = SIMD3<Float>(0.5, 0.7, 1.0)   // game.rs:464
-    private static let guideIntensity: Float = 3.0               // game.rs:464
-    private static let guideRadius: Float = 280.0                // game.rs:464
+
+    // Pen-carried lights (game.rs). Radii are WORLD units; the renderer scales
+    // them by the camera magnification so the glow footprint tracks the ink.
+    private static let guideColor = SIMD3<Float>(0.5, 0.7, 1.0)   // game.rs:463
+    private static let guideIntensity: Float = 3.0               // game.rs:463
+    private static let guideRadius: Float = 280.0                // game.rs:463
+    private static let greenColor = SIMD3<Float>(0.3, 1.0, 0.4)  // game.rs:483 (user/pen cursor)
+    private static let greenIntensity: Float = 4.0              // game.rs:483
+    private static let greenRadius: Float = 250.0              // game.rs:483
+    private static let letterAmbientColor = SIMD3<Float>(0.3, 0.3, 0.4) // game.rs:477
+    private static let letterAmbientIntensity: Float = 4.0     // game.rs:477
+    private static let letterAmbientRadius: Float = 350.0      // game.rs:477
 
     // Ink (Hello-style, docs/PLAN.md "Renderer decision"). Tunable at checkpoints.
-    private static let inkColor = SIMD4<Float>(0.95, 0.91, 0.82, 1.0)  // opaque warm cream
+    private static let inkColor = SIMD3<Float>(0.95, 0.91, 0.82)      // opaque warm cream
     private static let inkWidthGlyphUnits: Float = 36.0               // ~7.5% of the 480 box
     private static let inkCapSegments = 12                            // round cap/join facets
-    // The one fixed proverb this slice renders (settled ink, final block framing).
-    private static let proverb = "Good things come to those who wait"
+    /// Bright pen-tip dot (game.rs:468 fill_circle(pos, 8.0, (0.8,1.2,2.5))).
+    private static let penDotColor = SIMD3<Float>(1.1, 1.4, 2.2)
+    private static let penDotWidthFactor: Float = 1.35               // × ink half-width
+
+    /// Per-instance schedule seed, drawn from system randomness ONCE in `init`
+    /// (see header). Random per session ⇒ a random opening proverb; fixed for the
+    /// instance ⇒ the schedule is a pure function of absolute time (stateless
+    /// per-frame replay). Tests seed `ProverbSequence` directly, not this.
+    private let scheduleSeed: UInt64
 
     private let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -106,19 +131,25 @@ final class ZapRenderer {
 
     /// Parsed once from the bundle; `nil` degrades to background-only (no ink).
     private let glyphSet: GlyphSet?
+    /// Proverbs (sayings.json); empty degrades to background-only.
+    private let sayings: [String]
 
     private var sceneColor: MTLTexture?
     private var sceneSize: CGSize = .zero
 
-    // Ink geometry, rebuilt on resize (world-space triangle-strip verts for the proverb).
-    private var inkBuffer: MTLBuffer?
-    private var inkVertexCount: Int = 0
-    private var inkProjSize: SIMD2<Float> = .zero
+    // World viewport (height fixed to 600, width follows aspect) + layout cache.
+    private var currentProjSize: CGSize = .zero
+    private var layoutCache: [Int: ProverbLayout.Layout] = [:]
 
     /// Returns nil if Metal setup fails (device, shader compile, textures, or
     /// pipelines). GlyphSaverView renders nothing when the renderer is nil.
     init?(device: MTLDevice, pixelFormat: MTLPixelFormat, bundle: Bundle) {
         self.device = device
+        // One system-random seed per renderer instance: the saver session opens
+        // on a random proverb (GS-3 / VISION §Experience 2). `UInt64.random(in:)`
+        // uses SystemRandomNumberGenerator (CSPRNG-seeded) — genuine per-instance
+        // randomness, not the old fixed compile-time constant.
+        self.scheduleSeed = UInt64.random(in: UInt64.min ... UInt64.max)
         guard let queue = device.makeCommandQueue() else { return nil }
         self.queue = queue
 
@@ -145,8 +176,6 @@ final class ZapRenderer {
         }
 
         // --- Pipelines ---
-        // Scene + lighting are fullscreen (no vertex buffer); ink draws a
-        // world-space triangle soup into the same rgba16Float scene target.
         let scenePD = MTLRenderPipelineDescriptor()
         scenePD.label = "ScenePass"
         scenePD.vertexFunction = vfn
@@ -157,6 +186,16 @@ final class ZapRenderer {
         inkPD.vertexFunction = inkVfn
         inkPD.fragmentFunction = inkFfn
         inkPD.colorAttachments[0].pixelFormat = .rgba16Float   // same target as scene
+        // Alpha blend: at alpha 1 the cream ink is opaque (src replaces dst, so
+        // self-overlapping cursive loops compose cleanly); the proverb FADE
+        // (GS-3) lowers alpha to dissolve the ink back into the leather.
+        inkPD.colorAttachments[0].isBlendingEnabled = true
+        inkPD.colorAttachments[0].rgbBlendOperation = .add
+        inkPD.colorAttachments[0].alphaBlendOperation = .add
+        inkPD.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        inkPD.colorAttachments[0].sourceAlphaBlendFactor = .one
+        inkPD.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        inkPD.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         let lightPD = MTLRenderPipelineDescriptor()
         lightPD.label = "LightingPass"
         lightPD.vertexFunction = vfn
@@ -180,8 +219,7 @@ final class ZapRenderer {
         guard let sampler = device.makeSamplerState(descriptor: sd) else { return nil }
         self.sampler = sampler
 
-        // --- Textures. Leather as sRGB (sampling linearizes for linear
-        //     lighting into the extended-linear target); normal map as raw data.
+        // --- Textures. Leather as sRGB; normal map as raw data.
         let loader = MTKTextureLoader(device: device)
         let base: [MTKTextureLoader.Option: Any] = [
             .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
@@ -203,15 +241,23 @@ final class ZapRenderer {
             return nil
         }
 
-        // --- Glyph set (bundled generated artifact). Parse failure degrades to
+        // --- Glyph set + sayings (bundled artifacts). Parse failure degrades to
         //     background-only rather than failing the whole renderer. ---
         if let glyphURL = bundle.url(forResource: "glyphs_baked", withExtension: "json"),
            let glyphData = try? Data(contentsOf: glyphURL),
            let parsed = try? GlyphSet(data: glyphData) {
             self.glyphSet = parsed
         } else {
-            NSLog("ZapRenderer: glyphs_baked.json missing/unparseable — rendering background only")
+            NSLog("ZapRenderer: glyphs_baked.json missing/unparseable — background only")
             self.glyphSet = nil
+        }
+        if let sayingsURL = bundle.url(forResource: "sayings", withExtension: "json"),
+           let sayingsData = try? Data(contentsOf: sayingsURL),
+           let parsed = try? JSONDecoder().decode([String].self, from: sayingsData) {
+            self.sayings = parsed
+        } else {
+            NSLog("ZapRenderer: sayings.json missing/unparseable — background only")
+            self.sayings = []
         }
     }
 
@@ -225,69 +271,66 @@ final class ZapRenderer {
         desc.storageMode = .private
         sceneColor = device.makeTexture(descriptor: desc)
         sceneSize = size
-        rebuildInk(for: size)
     }
 
-    /// Lay out the proverb for this drawable's world box and (re)build the ink
-    /// vertex buffer. Called from `resize` (size-driven), so the layout tracks
-    /// aspect changes. World box: height fixed to 600, width follows aspect —
-    /// the same projSize the lighting pass uses, so ink registers with lights.
-    private func rebuildInk(for size: CGSize) {
-        guard let glyphSet = glyphSet, size.width > 0, size.height > 0 else {
-            inkBuffer = nil; inkVertexCount = 0; return
-        }
-        let aspect = CGFloat(size.width / size.height)
-        let projW = CGFloat(Self.worldHeight) * aspect
-        inkProjSize = SIMD2<Float>(Float(projW), Self.worldHeight)
+    // MARK: - Scheduling (pure GlyphCore reconstructed from absolute time)
 
-        let layout = ProverbLayout.layout(
-            proverb: Self.proverb, glyphs: glyphSet,
-            viewport: CGSize(width: projW, height: CGFloat(Self.worldHeight)))
+    /// World viewport for a drawable size: height fixed to 600, width by aspect.
+    private func projSize(for drawable: CGSize) -> CGSize {
+        let aspect = drawable.width / drawable.height
+        return CGSize(width: CGFloat(Self.worldHeight) * aspect, height: CGFloat(Self.worldHeight))
+    }
 
-        let verts = Self.tessellate(layout,
-                                    widthGlyphUnits: Self.inkWidthGlyphUnits,
-                                    capSegments: Self.inkCapSegments)
-        inkVertexCount = verts.count / 2
-        if inkVertexCount > 0 {
-            inkBuffer = device.makeBuffer(bytes: verts,
-                                          length: verts.count * MemoryLayout<Float>.stride,
-                                          options: .storageModeShared)
-        } else {
-            inkBuffer = nil
+    /// Layout for proverb `index` at the current world viewport, cached. The
+    /// cache is invalidated when the world size changes.
+    private func layout(_ index: Int, proj: CGSize) -> ProverbLayout.Layout? {
+        guard let glyphSet = glyphSet, sayings.indices.contains(index) else { return nil }
+        if proj != currentProjSize { layoutCache.removeAll(keepingCapacity: true); currentProjSize = proj }
+        if let cached = layoutCache[index] { return cached }
+        let l = ProverbLayout.layout(proverb: sayings[index], glyphs: glyphSet, viewport: proj)
+        layoutCache[index] = l
+        return l
+    }
+
+    /// Reconstruct (layout, clock, local time) for absolute elapsed `t`. Walks
+    /// the schedule from t=0 using this instance's seed, subtracting each
+    /// proverb's totalDuration. Cheap: layouts are cached; only WritingClock is
+    /// rebuilt per step, and the walk is O(t / proverb-duration).
+    private func scheduled(atAbsolute t: Double, proj: CGSize)
+        -> (layout: ProverbLayout.Layout, clock: WritingClock, local: CGFloat)? {
+        guard glyphSet != nil, !sayings.isEmpty else { return nil }
+        var seq = ProverbSequence(seed: scheduleSeed)
+        var remaining = CGFloat(max(0, t))
+        var guardIter = 0
+        while true {
+            let idx = seq.next(count: sayings.count)
+            guard let layout = layout(idx, proj: proj) else { return nil }
+            let clock = WritingClock(layout: layout)
+            if remaining < clock.totalDuration || guardIter > 100_000 {
+                return (layout, clock, max(0, remaining))
+            }
+            remaining -= clock.totalDuration
+            guardIter += 1
         }
     }
 
-    /// Tessellate the laid-out proverb's world-space polylines into a SINGLE
-    /// connected triangle strip: one quad per segment plus a round disc at every
-    /// vertex (a capsule union → round caps + round joins). Uniform width =
-    /// `widthGlyphUnits` glyph units, scaled to world by the layout scale (so the
-    /// ribbon stays ~7.5% of the glyph box at any viewport). Output is
-    /// [x0,y0, x1,y1, …] in world coords in triangle-strip order; the ink vertex
-    /// shader maps world → clip via projSize. Draw with `.triangleStrip`.
-    ///
-    /// Each convex piece is emitted with `addStrip`, which strip-triangulates a
-    /// convex polygon by the standard two-pointer zig-zag (p0, p1, pN-1, p2,
-    /// pN-2, …). Consecutive pieces are joined by a degenerate bridge (repeat
-    /// prev-last then next-first): the two collapsed triangles at every seam are
-    /// zero-area and never rasterize, so the pieces read as independent fills
-    /// inside one draw call. GS-2 review-0 required strips over the prior
-    /// triangle-list soup; the geometry (capsule union) is unchanged.
-    ///
-    /// Adapts ZapZap SegmentStripeMesh.swift:88–183 (perpendicular offset per
-    /// segment); deviates by using discs for joins/caps instead of miter/square
-    /// (round, and artifact-free for opaque self-overlapping cursive ink).
-    private static func tessellate(_ layout: ProverbLayout.Layout,
-                                   widthGlyphUnits: Float,
-                                   capSegments: Int) -> [Float] {
-        let halfW = widthGlyphUnits * 0.5 * Float(layout.scale)
+    // MARK: - Ink tessellation (world-space triangle strips)
+
+    /// Tessellate world-space polylines into ONE connected triangle strip: a quad
+    /// per segment + a round disc at every vertex (capsule union → round caps &
+    /// joins). Provenance/method unchanged from GS-2 (donor
+    /// SegmentStripeMesh.swift:88–183, disc joins instead of miter). The pen's
+    /// round cap comes for free: each partial polyline ends at the interpolated
+    /// pen point, and a disc is emitted there.
+    private static func tessellatePolylines(_ polylines: [[CGPoint]],
+                                            halfW: Float,
+                                            capSegments: Int) -> [Float] {
         guard halfW > 0 else { return [] }
         var v: [Float] = []
         var stripStarted = false
 
         @inline(__always) func emit(_ x: Float, _ y: Float) { v.append(x); v.append(y) }
 
-        // Emit `pts` (a convex polygon, CCW) as triangle-strip vertices, bridged
-        // to any preceding piece with degenerate triangles.
         func addStrip(_ pts: [(Float, Float)]) {
             let n = pts.count
             guard n >= 3 else { return }
@@ -295,7 +338,6 @@ final class ZapRenderer {
                 emit(v[v.count - 2], v[v.count - 1])   // repeat prev-last (degenerate)
                 emit(pts[0].0, pts[0].1)               // repeat next-first (degenerate)
             }
-            // Two-pointer convex-polygon strip: 0, 1, n-1, 2, n-2, 3, …
             emit(pts[0].0, pts[0].1)
             var front = 1, back = n - 1, takeFront = true
             while front <= back {
@@ -306,40 +348,102 @@ final class ZapRenderer {
             stripStarted = true
         }
 
-        // Round disc (cap/join): `capSegments` rim points, already CCW by angle.
         let step = (2.0 * Float.pi) / Float(capSegments)
-        func addDisc(_ cx: Float, _ cy: Float) {
+        func addDisc(_ cx: Float, _ cy: Float, _ radius: Float) {
             var rim: [(Float, Float)] = []
             rim.reserveCapacity(capSegments)
             for i in 0..<capSegments {
                 let a = step * Float(i)
-                rim.append((cx + halfW * cos(a), cy + halfW * sin(a)))
+                rim.append((cx + radius * cos(a), cy + radius * sin(a)))
             }
             addStrip(rim)
         }
 
-        for glyph in layout.glyphs {
-            for stroke in glyph.strokes where !stroke.isEmpty {
-                for p in stroke { addDisc(Float(p.x), Float(p.y)) }   // caps + joins
-                guard stroke.count >= 2 else { continue }
-                for i in 0..<(stroke.count - 1) {
-                    let x0 = Float(stroke[i].x),   y0 = Float(stroke[i].y)
-                    let x1 = Float(stroke[i+1].x), y1 = Float(stroke[i+1].y)
-                    let dx = x1 - x0, dy = y1 - y0
-                    let len = (dx*dx + dy*dy).squareRoot()
-                    guard len > 1e-6 else { continue }
-                    let nx = -dy / len * halfW, ny = dx / len * halfW
-                    // Segment ribbon quad, corners in convex (CCW) order.
-                    addStrip([(x0+nx, y0+ny), (x1+nx, y1+ny),
-                              (x1-nx, y1-ny), (x0-nx, y0-ny)])
-                }
+        for stroke in polylines where !stroke.isEmpty {
+            for p in stroke { addDisc(Float(p.x), Float(p.y), halfW) }   // caps + joins
+            guard stroke.count >= 2 else { continue }
+            for i in 0..<(stroke.count - 1) {
+                let x0 = Float(stroke[i].x),   y0 = Float(stroke[i].y)
+                let x1 = Float(stroke[i+1].x), y1 = Float(stroke[i+1].y)
+                let dx = x1 - x0, dy = y1 - y0
+                let len = (dx*dx + dy*dy).squareRoot()
+                guard len > 1e-6 else { continue }
+                let nx = -dy / len * halfW, ny = dx / len * halfW
+                addStrip([(x0+nx, y0+ny), (x1+nx, y1+ny),
+                          (x1-nx, y1-ny), (x0-nx, y0-ny)])
             }
         }
         return v
     }
 
+    /// A single filled disc as a triangle strip (the pen-tip dot).
+    private static func discStrip(center: CGPoint, radius: Float, segments: Int) -> [Float] {
+        guard radius > 0 else { return [] }
+        let step = (2.0 * Float.pi) / Float(segments)
+        var pts: [(Float, Float)] = []
+        pts.reserveCapacity(segments)
+        for i in 0..<segments {
+            let a = step * Float(i)
+            pts.append((Float(center.x) + radius * cos(a), Float(center.y) + radius * sin(a)))
+        }
+        // Reuse the convex-strip triangulation via tessellatePolylines' addStrip
+        // by feeding a degenerate polyline is awkward; emit directly here.
+        var v: [Float] = []
+        @inline(__always) func emit(_ x: Float, _ y: Float) { v.append(x); v.append(y) }
+        let n = pts.count
+        guard n >= 3 else { return [] }
+        emit(pts[0].0, pts[0].1)
+        var front = 1, back = n - 1, takeFront = true
+        while front <= back {
+            if takeFront { emit(pts[front].0, pts[front].1); front += 1 }
+            else         { emit(pts[back].0,  pts[back].1);  back  -= 1 }
+            takeFront.toggle()
+        }
+        return v
+    }
+
+    /// Per-stroke inked polyline (world coords) for the current pen position:
+    /// full points 0..<m plus, if the pen is mid-segment, the interpolated tip.
+    private static func writingPolylines(layout: ProverbLayout.Layout,
+                                         clock: WritingClock,
+                                         local: CGFloat) -> [[CGPoint]] {
+        var out: [[CGPoint]] = []
+        for s in clock.strokes {
+            let inked = clock.inkedPointCount(s, at: local)
+            guard inked > 0 else { continue }
+            let stroke = layout.glyphs[s.glyphIndex].strokes[s.strokeIndex]
+            if inked >= CGFloat(stroke.count) { out.append(stroke); continue }
+            let m = Int(inked.rounded(.down))          // whole points inked: 0..<m
+            guard m >= 1 else { continue }
+            if m >= stroke.count { out.append(stroke); continue }
+            var pts = Array(stroke[0..<m])
+            let frac = inked - CGFloat(m)              // into segment [m-1, m]
+            if frac > 1e-4 && m < stroke.count {
+                let a = stroke[m - 1], b = stroke[m]
+                pts.append(CGPoint(x: a.x + (b.x - a.x) * frac,
+                                   y: a.y + (b.y - a.y) * frac))
+            }
+            out.append(pts)
+        }
+        return out
+    }
+
+    /// The pen tip in WORLD coords (interpolated along the active stroke).
+    private static func penTipWorld(layout: ProverbLayout.Layout,
+                                    pen: WritingClock.Pen) -> CGPoint {
+        let stroke = layout.glyphs[pen.glyphIndex].strokes[pen.strokeIndex]
+        guard !stroke.isEmpty else { return layout.glyphs[pen.glyphIndex].center }
+        let i0 = min(stroke.count - 1, max(0, Int(pen.pointPosition.rounded(.down))))
+        let i1 = min(stroke.count - 1, i0 + 1)
+        let frac = pen.pointPosition - CGFloat(i0)
+        let a = stroke[i0], b = stroke[i1]
+        return CGPoint(x: a.x + (b.x - a.x) * frac, y: a.y + (b.y - a.y) * frac)
+    }
+
+    // MARK: - Render entry points
+
     /// Render one frame into the layer's next drawable. `time` is monotonic
-    /// elapsed seconds (drives the light path).
+    /// elapsed seconds (drives the whole schedule).
     func render(to layer: CAMetalLayer, time: Double) {
         let ds = layer.drawableSize
         guard ds.width > 0, ds.height > 0 else { return }
@@ -351,14 +455,9 @@ final class ZapRenderer {
         cmd.commit()
     }
 
-    /// Isolation test seam. Renders one frame into an arbitrary target texture
-    /// and blocks until the GPU finishes, so an offscreen harness can validate
-    /// the full pipeline (runtime shader compile, texture load, both passes,
-    /// moving light) without a CAMetalLayer/drawable or the operator's
-    /// screen-saver environment. Not used by the live saver.
-    /// Seam rationale (ledger): render target varies between drawable (live) and
-    /// offscreen texture (test); simpler alternative — vending drawables from an
-    /// unattached CAMetalLayer — is undocumented/flaky, so rejected.
+    /// Isolation test seam (verify.sh / thumbnail). Renders one frame into an
+    /// arbitrary target and blocks until the GPU finishes. Deterministic: the
+    /// schedule is a pure function of `time`. Not used by the live saver's loop.
     func renderFrameSynchronously(into target: MTLTexture, time: Double) {
         let size = CGSize(width: target.width, height: target.height)
         if sceneColor == nil || size != sceneSize { resize(size) }
@@ -369,17 +468,66 @@ final class ZapRenderer {
     }
 
     /// Encode the scene pass (offscreen color) and the lighting pass (into
-    /// `target`) onto `cmd`. Single source of pass logic for both entry points.
+    /// `target`). Single source of pass logic for both entry points.
     private func encodeFrame(into target: MTLTexture, time: Double, cmd: MTLCommandBuffer) {
         guard let sceneColor = sceneColor else { return }
         let ds = CGSize(width: target.width, height: target.height)
 
         let aspect = Float(ds.width / ds.height)
-        // Aspect-fill scale about UV centre: shrink the longer view axis.
         let fillScale = SIMD2<Float>(min(1.0, aspect), min(1.0, 1.0 / aspect))
-        // World box: height fixed to the game's 600 units, width follows aspect
-        // (radius 280 then reads as ~0.47 of the height, matching the game).
-        let projSize = SIMD2<Float>(Self.worldHeight * aspect, Self.worldHeight)
+        let projSizeF = SIMD2<Float>(Self.worldHeight * aspect, Self.worldHeight)
+        let proj = CGSize(width: CGFloat(projSizeF.x), height: CGFloat(projSizeF.y))
+
+        // ---- Resolve this frame's proverb + pen + camera (pure GlyphCore) ----
+        var inkVerts: [Float] = []
+        var penDotVerts: [Float] = []
+        var inkAlpha: Float = 1
+        var camScale: Float = 1
+        var camFocus = SIMD2<Float>(projSizeF.x * 0.5, projSizeF.y * 0.5)
+        var lights: [PointLightGPU] = []
+
+        if let s = scheduled(atAbsolute: time, proj: proj) {
+            let layout = s.layout, clock = s.clock, local = s.local
+            let camera = CameraPlan.camera(at: local, layout: layout, clock: clock)
+            camScale = Float(camera.scale)
+            camFocus = SIMD2<Float>(Float(camera.focus.x), Float(camera.focus.y))
+
+            let halfW = Self.inkWidthGlyphUnits * 0.5 * Float(layout.scale)
+            let polylines = Self.writingPolylines(layout: layout, clock: clock, local: local)
+            inkVerts = Self.tessellatePolylines(polylines, halfW: halfW, capSegments: Self.inkCapSegments)
+
+            switch clock.phase(at: local) {
+            case .writing:
+                inkAlpha = 1
+                if let pen = clock.pen(at: local) {
+                    let tip = Self.penTipWorld(layout: layout, pen: pen)
+                    penDotVerts = Self.discStrip(center: tip,
+                                                 radius: halfW * Self.penDotWidthFactor,
+                                                 segments: Self.inkCapSegments)
+                    // Pen-carried lights, positioned in VIEW space via the camera.
+                    let tipV = camera.project(tip)
+                    let centerV = camera.project(layout.glyphs[pen.glyphIndex].center)
+                    lights.append(Self.makeLight(pos: tipV, color: Self.guideColor,
+                                                 intensity: Self.guideIntensity,
+                                                 radius: Self.guideRadius * camScale))
+                    lights.append(Self.makeLight(pos: tipV, color: Self.greenColor,
+                                                 intensity: Self.greenIntensity,
+                                                 radius: Self.greenRadius * camScale))
+                    lights.append(Self.makeLight(pos: centerV, color: Self.letterAmbientColor,
+                                                 intensity: Self.letterAmbientIntensity,
+                                                 radius: Self.letterAmbientRadius * camScale))
+                }
+            case .holding, .done:
+                inkAlpha = 1
+                lights = [holdSweepLight(time: time, proj: projSizeF)]
+            case .fading(let alpha):
+                inkAlpha = Float(alpha)
+                lights = [holdSweepLight(time: time, proj: projSizeF)]
+            }
+        } else {
+            // No glyphs/sayings: background-only, single slow sweep (GS-1 look).
+            lights = [holdSweepLight(time: time, proj: projSizeF)]
+        }
 
         // ---- Scene pass → offscreen color buffer ----
         let scenePass = MTLRenderPassDescriptor()
@@ -396,34 +544,43 @@ final class ZapRenderer {
             enc.setFragmentBytes(&fs, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-            // Ink ribbons on top of the leather, into the same scene buffer.
-            // Opaque cream; lit (and relief-shaded) by the following pass.
-            if let inkBuffer = inkBuffer, inkVertexCount > 0 {
+            // Ink ribbons (camera-transformed) into the same scene buffer.
+            var ink = InkUniformsGPU(projSize: projSizeF, focus: camFocus, scale: camScale, pad: 0)
+            if !inkVerts.isEmpty,
+               let buf = device.makeBuffer(bytes: inkVerts,
+                                           length: inkVerts.count * MemoryLayout<Float>.stride,
+                                           options: .storageModeShared) {
                 enc.setRenderPipelineState(inkPipeline)
-                enc.setVertexBuffer(inkBuffer, offset: 0, index: 0)
-                var ink = InkUniformsGPU(projSize: inkProjSize)
+                enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
-                var color = Self.inkColor
+                var color = SIMD4<Float>(Self.inkColor.x, Self.inkColor.y, Self.inkColor.z, inkAlpha)
                 enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-                // One connected strip for the whole proverb (pieces joined by
-                // degenerate bridges; see `tessellate`). GS-2 review-0 required
-                // triangle strips over the prior triangle-list soup.
-                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: inkVertexCount)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: inkVerts.count / 2)
+            }
+            // Bright pen-tip dot (same camera, brighter color).
+            if !penDotVerts.isEmpty,
+               let buf = device.makeBuffer(bytes: penDotVerts,
+                                           length: penDotVerts.count * MemoryLayout<Float>.stride,
+                                           options: .storageModeShared) {
+                enc.setRenderPipelineState(inkPipeline)
+                enc.setVertexBuffer(buf, offset: 0, index: 0)
+                enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
+                var color = SIMD4<Float>(Self.penDotColor.x, Self.penDotColor.y, Self.penDotColor.z, inkAlpha)
+                enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: penDotVerts.count / 2)
             }
             enc.endEncoding()
         }
 
-        // ---- Lighting pass → drawable ----
-        var light = PointLightGPU()
-        let lp = guideLightPosition(time: time, proj: projSize)
-        light.x = lp.x; light.y = lp.y
-        light.r = Self.guideColor.x; light.g = Self.guideColor.y; light.b = Self.guideColor.z
-        light.intensity = Self.guideIntensity
-        light.radius = Self.guideRadius
+        // ---- Lighting pass → target ----
+        if lights.isEmpty { lights = [holdSweepLight(time: time, proj: projSizeF)] }
+        let count = min(lights.count, 8)
+        var lightArray = [PointLightGPU](repeating: PointLightGPU(), count: 8)
+        for i in 0..<count { lightArray[i] = lights[i] }
 
         var uniforms = LightingUniformsGPU()
-        uniforms.ambientAndCount = SIMD4<Float>(Self.ambient.x, Self.ambient.y, Self.ambient.z, 1.0)
-        uniforms.projSizeFill = SIMD4<Float>(projSize.x, projSize.y, fillScale.x, fillScale.y)
+        uniforms.ambientAndCount = SIMD4<Float>(Self.ambient.x, Self.ambient.y, Self.ambient.z, Float(count))
+        uniforms.projSizeFill = SIMD4<Float>(projSizeF.x, projSizeF.y, fillScale.x, fillScale.y)
 
         let lightPass = MTLRenderPassDescriptor()
         lightPass.colorAttachments[0].texture = target
@@ -437,20 +594,31 @@ final class ZapRenderer {
             enc.setFragmentTexture(normalMap, index: 1)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.setFragmentBytes(&uniforms, length: MemoryLayout<LightingUniformsGPU>.stride, index: 0)
-            enc.setFragmentBytes(&light, length: MemoryLayout<PointLightGPU>.stride, index: 1)
+            enc.setFragmentBytes(&lightArray,
+                                 length: MemoryLayout<PointLightGPU>.stride * 8, index: 1)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
     }
 
-    /// Slow smooth Lissajous sweep across the world box. Two nearly-incommensurate
-    /// low frequencies keep the path non-repeating and unhurried.
-    private func guideLightPosition(time: Double, proj: SIMD2<Float>) -> SIMD2<Float> {
+    private static func makeLight(pos: CGPoint, color: SIMD3<Float>,
+                                  intensity: Float, radius: Float) -> PointLightGPU {
+        var l = PointLightGPU()
+        l.x = Float(pos.x); l.y = Float(pos.y)
+        l.r = color.x; l.g = color.y; l.b = color.z
+        l.intensity = intensity; l.radius = radius
+        return l
+    }
+
+    /// Gentle non-repeating Lissajous guide sweep for hold/fade/background so the
+    /// scene never freezes (VISION §3). Two nearly-incommensurate low frequencies.
+    private func holdSweepLight(time: Double, proj: SIMD2<Float>) -> PointLightGPU {
         let t = Float(time)
         let cx = proj.x * 0.5, cy = proj.y * 0.5
         let ax = proj.x * 0.36, ay = proj.y * 0.36
-        let x = cx + ax * sin(0.13 * t)
-        let y = cy + ay * sin(0.19 * t + 1.3)
-        return SIMD2<Float>(x, y)
+        let pos = CGPoint(x: CGFloat(cx + ax * sin(0.13 * t)),
+                          y: CGFloat(cy + ay * sin(0.19 * t + 1.3)))
+        return Self.makeLight(pos: pos, color: Self.guideColor,
+                              intensity: Self.guideIntensity, radius: Self.guideRadius)
     }
 }
