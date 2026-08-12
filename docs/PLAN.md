@@ -73,11 +73,19 @@ GlyphCore  (SPM library — pure Swift, Foundation + CG value types only)
   WritingClock   pure timeline: elapsed → inked strokes, active stroke, pen
                  arc-length position, celebration timers, phase
                  (writing | letterCelebrate | holding | fading), next-pick
-  CameraPlan     pure viewport: (inked + active letter bboxes) → padded
-                 union target frame, exponentially smoothed; starts framed
-                 on the first letter's box, monotonically zooms out, ends
-                 exactly at the full-block framing. World→screen transform
-                 applied to ink/pen/lights; background is screen-fixed.
+  CameraPlan     pure viewport via ANTICIPATORY KEYFRAMES + C1 interpolation
+                 (ratified 2026-08-12, superseding "exponential smoothing":
+                 a lag provably violates always-contain during zoom-out —
+                 builder-surfaced DECISION cam-smoothing; a stepped envelope
+                 provably jumps — human field observation). Keyframe at each
+                 letter start = padded frame containing letters 0..k+1
+                 (one-letter lookahead ⇒ containment by construction; last
+                 keyframe = full-block frame); C1-smooth monotone
+                 interpolation of scale+center between keyframes ⇒ no jumps,
+                 monotone zoom-out, exact final framing. The camera can
+                 anticipate because the whole layout is known up front.
+                 World→screen transform applied to ink/pen/lights;
+                 background is screen-fixed.
 
 Render layer  (Sources/Saver/ — Metal + AppKit + ScreenSaver, NOT under test)
   GlyphSaverView   ScreenSaverView hosting the CAMetalLayer, drives
@@ -198,11 +206,14 @@ the winning-screen scale over the living background.
   authored order, letters in reading order; phases writing → holding
   (~12 s) → fading → next proverb (uniform random, no immediate repeat).
   Tests: phase transitions, monotonic ink progress, no-repeat.
-- `CameraPlan` (amended 2026-08-11): opens framed on the first letter's
-  glyph box (~65% of screen height), target = padded union bbox of inked +
-  active letter, exponential smoothing (~1 s time constant), ends at the
-  full-block framing. Tests: zoom-out monotonic, active letter always in
-  frame, final frame equals the GS-2 static framing.
+- `CameraPlan` (re-ratified 2026-08-12, DECISION cam-smoothing): opens
+  framed on the first letter's glyph box (~65% of screen height), then
+  anticipatory keyframes + C1 interpolation (see architecture entry).
+  Tests: zoom-out monotonic, active letter always in frame, final frame
+  equals the GS-2 static framing numerically, AND smoothness — sample
+  camera(t) at 1/30 s steps over a full proverb and assert the max
+  per-frame change of scale and center is bounded (the anti-jump gate —
+  numeric, not screenshot-based; a step reads as one huge delta).
 - Render: partial-stroke ribbons up to pen position; pen tip dot; the pen
   carries the guide + green lights along the actual stroke path; camera
   transform applied to ink/pen/lights, leather screen-fixed.
