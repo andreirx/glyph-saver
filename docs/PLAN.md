@@ -236,6 +236,9 @@ product's defining behavior, watchable.
   fireworks-like, ~2–3 s to black → next proverb. WritingClock gains the
   finale phases (pure, tested: phase boundaries, ignite-color exclusion
   of low saturation). Fallback knob recorded: quick fade-to-black.
+  **Human directive 2026-08-12: render the full 4×–8× HDR values as
+  specified — display clamping/profile is explicitly out of scope; do NOT
+  tone-map, reduce, or "SDR-adapt" the finale colors.**
 - `isPreview` legibility check; multi-screen check.
 - Parity review: side-by-side with the web game — writing/celebration
   parity, finale as deliberate divergence (VISION experience §6).
