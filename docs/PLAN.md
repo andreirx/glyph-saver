@@ -222,16 +222,26 @@ Output surface: the saver writes proverbs in place, letter by letter, the
 camera pulling back from one huge letter to the full boxed proverb — the
 product's defining behavior, watchable.
 
-### GS-4 — Celebrations & parity (PROTOTYPE → MATURE on approval)
+### GS-4 — Celebrations & the finale (PROTOTYPE → MATURE on approval)
 
 - Letter-complete: gold stroke flood (8t,6.8t,2.4t; width 8→20; 1.2 s) +
   gold light + 25-particle burst (ZapZap ParticleEffects adaptation).
-- Saying-complete: central gold dwell light (i10t, r400) through the hold.
+- **Finale** (ratified 2026-08-12, supersedes the 12 s static dwell; the
+  dull hold was a human field observation): dwell ~5 s under the central
+  gold light (i10t, r400) → IGNITE: settled ink ramps ~1.5 s to a random
+  full-saturation hue (never grey/white; seeded-random per proverb) at
+  4×–8× HDR intensity (named constants) → DISSOLVE: particles emitted
+  along the stroke polylines (emitter positions sampled from the paths;
+  HDR-colored like the ignited ink) while ribbon alpha ramps out,
+  fireworks-like, ~2–3 s to black → next proverb. WritingClock gains the
+  finale phases (pure, tested: phase boundaries, ignite-color exclusion
+  of low saturation). Fallback knob recorded: quick fade-to-black.
 - `isPreview` legibility check; multi-screen check.
-- Parity review: side-by-side with the web game's saying-complete screen.
+- Parity review: side-by-side with the web game — writing/celebration
+  parity, finale as deliberate divergence (VISION experience §6).
 
-Output surface: the finished look — celebrations firing, judged against the
-game.
+Output surface: the finished look — letter celebrations firing and the
+ignite-dissolve finale, watched live.
 
 ### GS-RO — Romanian proverbs (DEFERRED — human authoring required)
 

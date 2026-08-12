@@ -105,8 +105,18 @@ From `examples/glypher/src/{glyphs.rs, game.rs}`:
    cream ink is the chosen contrast (ratified 2026-08-11). The game's green
    pen light may be tuned warm to match the cream ink — operator latitude
    at checkpoints, not a re-ratification.
-6. Proverb complete: central gold dwell light (~12 s hold), then fade, next
-   proverb.
+6. Proverb complete — the **finale** (amended 2026-08-12, human direction;
+   deliberate divergence from game parity, whose saying-complete is only a
+   dwell light): a short admiring dwell under the central gold light
+   (~5 s), then the ink **ignites** — the settled cream ramps over ~1.5 s
+   to a random VIBRANT hue at 4×–8× HDR intensity (full-saturation hue,
+   never grey/white; on this SDR panel it tone-clamps to a vivid glow, on
+   XDR it is real fire) — then the strokes **dissolve into particles**:
+   HDR particles emitted along the stroke paths as the ink fades,
+   fireworks-like (ZapZap particle heritage), falling/dispersing to black
+   (~2–3 s). Then the next proverb begins from its first huge letter.
+   Fallback knob (recorded, not built): quick fade-to-black if the
+   dissolve disappoints at checkpoint.
 7. Identical on every attached screen; scaled down in System Settings preview.
 8. EDR: the surface is EDR-capable; on this machine's panel (verified
    `maximumPotentialEDR = 1.0`) output is tone-limited SDR today — an XDR
