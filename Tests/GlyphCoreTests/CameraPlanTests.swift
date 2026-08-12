@@ -146,10 +146,14 @@ final class CameraPlanTests: XCTestCase {
         for saying in try allSayings() {
             let (layout, clock) = try fixture(saying)
             let vp = layout.viewport
-            // Sample during holding, during fading, and after done.
+            // Sample during holding, igniting, dissolving, and after done — the
+            // camera holds the static framing across the entire finale (it only
+            // moves during writing).
             for t in [clock.writingDuration,
                       clock.writingDuration + clock.holdDuration / 2,
-                      clock.writingDuration + clock.holdDuration + clock.fadeDuration / 2,
+                      clock.writingDuration + clock.holdDuration + clock.igniteDuration / 2,
+                      clock.writingDuration + clock.holdDuration + clock.igniteDuration
+                          + clock.dissolveDuration / 2,
                       clock.totalDuration + 10] {
                 let cam = CameraPlan.camera(at: t, layout: layout, clock: clock)
                 XCTAssertEqual(cam.scale, 1, accuracy: 1e-9, "not identity scale for \"\(saying)\"")

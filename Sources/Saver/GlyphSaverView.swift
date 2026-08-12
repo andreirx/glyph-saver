@@ -120,6 +120,15 @@ final class GlyphSaverView: ScreenSaverView {
     // Swift module. Never called by the live saver.
     @objc(renderVerificationFrameAtTime:)
     func renderVerificationFrame(atTime t: Double) -> CGImage? {
+        renderVerificationFrame(atTime: t, inkWidthGlyphUnits: 0)
+    }
+
+    // Width-override variant (operator note 2026-08-12): render the SAME frame at
+    // a non-default ink width for the human width-legibility comparison
+    // (verify-width28.png). `inkWidthGlyphUnits <= 0` means "use the ratified
+    // default" so the plain seam above is a thin wrapper. Verification-only.
+    @objc(renderVerificationFrameAtTime:inkWidthGlyphUnits:)
+    func renderVerificationFrame(atTime t: Double, inkWidthGlyphUnits: Double) -> CGImage? {
         guard let renderer = renderer, let device = device else { return nil }
         let scale = window?.backingScaleFactor ?? 2.0
         let ptW = bounds.width  > 0 ? bounds.width  : frame.width
@@ -133,7 +142,8 @@ final class GlyphSaverView: ScreenSaverView {
         desc.storageMode = .shared   // Apple Silicon unified memory: CPU-readable render target.
         guard let target = device.makeTexture(descriptor: desc) else { return nil }
 
-        renderer.renderFrameSynchronously(into: target, time: t)
+        let widthOverride: Float? = inkWidthGlyphUnits > 0 ? Float(inkWidthGlyphUnits) : nil
+        renderer.renderFrameSynchronously(into: target, time: t, inkWidthGlyphUnits: widthOverride)
         return GlyphSaverView.cgImage(from: target)
     }
 

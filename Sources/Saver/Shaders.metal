@@ -118,6 +118,109 @@ fragment float4 ink_fragment(constant float4 &color [[buffer(0)]]) {
     return color;   // cream (or bright pen dot); lit by the following lighting pass
 }
 
+// ---- Emissive pass: self-luminous HDR geometry composited ADDITIVELY on top of
+// the lit frame (slice GS-4). Two producers feed it, both camera-transformed like
+// the ink (world → view via InkUniforms):
+//   1. the finale IGNITED INK — the settled letters, ramped to a full-saturation
+//      4×–8× HDR hue (VISION §6). Additive + self-luminous is REQUIRED by the
+//      human directive (2026-08-12): the 4×–8× values must reach the panel
+//      unreduced; if the ignited ink went through the lighting MULTIPLY it would
+//      be scaled down by the near-dark ambient. Additive guarantees the full HDR
+//      value is present in the frame (the XDR panel presents the headroom).
+//   2. PARTICLES (letter-burst gold sparks + finale dissolve fireworks) — glowing
+//      quads that likewise must not be dimmed by the scene lighting.
+// Per-vertex colour (rgb HDR, a = fade/ramp alpha); the pipeline's additive blend
+// is configured host-side (ZapRenderer): dst.rgb += src.rgb·src.a.
+struct EmissiveInOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex EmissiveInOut emissive_vertex(uint vid [[vertex_id]],
+                                     device const float *verts [[buffer(0)]],
+                                     constant InkUniforms &u [[buffer(1)]]) {
+    // 6 floats / vertex: x, y (world), r, g, b, a.
+    uint base = vid * 6u;
+    float2 w = float2(verts[base + 0u], verts[base + 1u]);
+    float2 view = (w - u.focus) * u.scale + u.projSize * 0.5;   // same camera as ink
+    float2 uv = view / u.projSize;
+    float2 clip = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    EmissiveInOut out;
+    out.position = float4(clip, 0.0, 1.0);
+    out.color = float4(verts[base + 2u], verts[base + 3u], verts[base + 4u], verts[base + 5u]);
+    return out;
+}
+
+// Premultiply by alpha here so the host blend is a plain add (src.rgb + dst.rgb):
+// dst.rgb += color.rgb·color.a. Alpha channel is left to the host blend (target
+// stays opaque).
+fragment float4 emissive_fragment(EmissiveInOut in [[stage_in]]) {
+    return float4(in.color.rgb * in.color.a, in.color.a);
+}
+
+// ---- Particle pass: INSTANCED quads (slice GS-4, review-0 requirement).
+// The particle producers (ParticleField) hand ZapRenderer one record per live
+// particle; each is drawn as an instanced unit quad rather than pre-expanded into
+// six CPU vertices. One quad geometry (a 4-vertex triangle strip) is replayed per
+// instance, sized/positioned/coloured from the per-instance record. Shares the
+// emissive additive BLEND (particles are self-luminous HDR, like the ignited ink)
+// but has its OWN vertex + fragment stages: particle_fragment applies a radial
+// soft falloff so each quad reads as a round spark, not a hard square.
+//
+// Layout MUST match Swift `ParticleQuad` (ParticleField.swift), uploaded verbatim
+// as the instance buffer: float2 center(off 0), float halfSize(off 8), float4
+// color(off 16, 16-aligned) ⇒ stride 32. Same SIMD2/float/SIMD4 ↔ float2/float/
+// float4 correspondence InkUniforms already relies on.
+struct ParticleInstance {
+    float2 center;    // world centre (y-down), camera-transformed here
+    float  halfSize;  // world half-extent of the quad
+    float4 color;     // rgb HDR (may exceed 1), a = lifetime fade alpha
+};
+
+// Per-particle interpolants: the emissive HDR colour plus the quad-LOCAL
+// coordinate (corner ∈ [-1,1]²) the fragment uses for a RADIAL soft falloff, so
+// each instanced quad reads as a round firework spark rather than a hard square
+// (operator note 2026-08-12: verify-2 showed blocky quads). No texture — the
+// sprite is procedural (distance from quad centre).
+struct ParticleInOut {
+    float4 position [[position]];
+    float4 color;
+    float2 local;   // quad-local coord in [-1,1]², 0 at centre
+};
+
+// Unit-quad corners for a 4-vertex triangle strip, from vertex_id:
+//   0→(-1,-1) 1→(+1,-1) 2→(-1,+1) 3→(+1,+1)  (triangles 0-1-2, 1-2-3).
+vertex ParticleInOut particle_vertex(uint vid [[vertex_id]],
+                                     uint iid [[instance_id]],
+                                     device const ParticleInstance *insts [[buffer(0)]],
+                                     constant InkUniforms &u [[buffer(1)]]) {
+    ParticleInstance p = insts[iid];
+    float2 corner = float2((vid & 1u) != 0u ? 1.0 : -1.0,
+                           (vid & 2u) != 0u ? 1.0 : -1.0);
+    float2 w = p.center + corner * p.halfSize;
+    float2 view = (w - u.focus) * u.scale + u.projSize * 0.5;   // same camera as ink
+    float2 uv = view / u.projSize;
+    float2 clip = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    ParticleInOut out;
+    out.position = float4(clip, 0.0, 1.0);
+    out.color = p.color;
+    out.local = corner;
+    return out;
+}
+
+// Round soft spark: radial falloff of the fade alpha by distance from the quad
+// centre (d ∈ [0,1] across the inscribed disc; d>1 at the corners → alpha 0, so
+// the square becomes a disc with NO hard edge). Quadratic falloff = a bright
+// glowing core easing to transparent. Premultiplies like emissive_fragment so
+// the host blend stays a plain additive add (dst.rgb += src.rgb·src.a).
+fragment float4 particle_fragment(ParticleInOut in [[stage_in]]) {
+    float d = length(in.local);
+    float falloff = saturate(1.0 - d);
+    falloff *= falloff;
+    float a = in.color.a * falloff;
+    return float4(in.color.rgb * a, a);
+}
+
 // ---- Lighting pass: port of lighting.wgsl fs_lighting (L52–93).
 fragment float4 lighting_fragment(VSOut in [[stage_in]],
                                   texture2d<float> sceneTex [[texture(0)]],

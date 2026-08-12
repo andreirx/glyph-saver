@@ -39,9 +39,10 @@ particles, or EDR. **Metal**, adapting the **ZapZap** donor
      (`vbg_1024.jpg`) + ink strokes as tessellated triangle-strip ribbons
      (polyline → ribbon in the render layer) — **Hello-style strokes**
      (amended 2026-08-11): thick, uniform width, round caps, round joins,
-     opaque warm cream. Starting constants (tune at checkpoints): width 36
-     glyph units (~7.5% of the 480-unit glyph box; the game's 6-unit guide
-     line is NOT the reference — the macOS Hello saver is), color ≈
+     opaque warm cream. Constants: width **28 glyph units** (human pick
+     2026-08-12 from rendered 28-vs-36 comparison — 36 filled the small
+     'e' counters solid at reading size; the game's 6-unit guide line is
+     NOT the reference — the macOS Hello saver is), color ≈
      (0.95, 0.91, 0.82). Opaque because cursive loops self-overlap and only
      opaque ink crosses cleanly. A parallel **normal buffer** holds the
      background's normal map; strokes do NOT write normals — the leather

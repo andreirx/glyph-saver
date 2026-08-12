@@ -1,6 +1,6 @@
 //
 //  ZapRenderer.swift — Metal renderer for Glyph Saver
-//  Module maturity: PROTOTYPE (slice GS-3)
+//  Module maturity: PROTOTYPE (slice GS-4)
 //
 //  PROVENANCE
 //  ----------
@@ -18,11 +18,13 @@
 //  the zap-web pipeline verified in VISION.md: lighting is a fullscreen
 //  post-process that multiplies over the composed scene.
 //
-//  GS-3 — THE WRITING (this slice)
-//  ------------------------------
+//  GS-3 — THE WRITING (landed GS-3; the finale below supersedes its tail)
+//  ---------------------------------------------------------------------
 //  An invisible pen writes each proverb letter by letter while the camera pulls
-//  back from one huge letter to the full boxed proverb; hold; fade; next. All of
-//  the *decisions* are pure GlyphCore:
+//  back from one huge letter to the full boxed proverb, then holds and hands off
+//  to the GS-4 FINALE (below) — NOT the old GS-3 "hold 12 s → fade" tail, which
+//  the ratified finale replaced (VISION §6). All of the *decisions* are pure
+//  GlyphCore:
 //    - ProverbSequence  — uniform-random, no-immediate-repeat pick over
 //      sayings.json. Seeded ONCE per renderer instance from system randomness
 //      (each saver session opens on a random proverb — VISION §Experience 2 /
@@ -31,9 +33,10 @@
 //      can replay it statelessly from t=0 every frame; the two verify.sh captures
 //      from one host process therefore stay mutually consistent.
 //    - WritingClock     — per-proverb timeline: which strokes are inked, the pen
-//      arc-length position (GUIDE_SPEED = 60 pts/s, game.rs:26), and the phase
-//      writing → holding (12 s, SAYING_CELEBRATE_DURATION game.rs:31) →
-//      fading (1 s) → done.
+//      arc-length position (GUIDE_SPEED = 60 pts/s, game.rs:26), and the ratified
+//      finale phase machine writing → holding (~5 s gold dwell) →
+//      igniting (~1.5 s) → dissolving (~2.5 s) → done (VISION §6 / PLAN GS-4;
+//      these superseded the game's static 12 s SAYING_CELEBRATE_DURATION dwell).
 //    - CameraPlan       — the monotone world→view pull-back (opens on letter 1,
 //      converges to the GS-2 static framing). Applied to INK/PEN/LIGHTS only.
 //  The renderer is pure mechanism: each frame it reconstructs (proverb, local
@@ -43,13 +46,32 @@
 //  [0.3,1.0,0.4] i4 r250 (game.rs:463/483) + faint letter ambient
 //  [0.3,0.3,0.4] i4 r350 (game.rs:477) — in VIEW space through the camera. The
 //  leather (scene pass) and the lighting pass stay screen-fixed (VISION §3).
-//  During hold/fade a gentle Lissajous ambient sweep keeps the scene alive.
+//  During the holding dwell a gentle Lissajous ambient sweep keeps the scene
+//  alive under the gold dwell light (before the finale ignites the ink).
 //
-//  ABSTRACTION LEDGER (this file adds none): one concrete renderer, called only
-//  by GlyphSaverView; GlyphCore is the sole (pure) collaborator. The ink
-//  vertex buffer is now rebuilt PER FRAME (partial strokes change every frame);
-//  layouts are cached per (proverb index, world size) so only the cheap
-//  WritingClock and the tessellation recompute each frame.
+//  GS-4 — CELEBRATIONS & THE FINALE (this slice)
+//  --------------------------------------------
+//  Three additions, all still stateless per-frame replays of pure GlyphCore:
+//    - LETTER CELEBRATION (game.rs:533-553, 795-803): as each letter finishes it
+//      floods GOLD — its strokes redrawn wide-and-golden into the SCENE buffer
+//      (so the following lighting pass shades them, game parity) + a gold point
+//      light at the glyph centre + a 25-spark burst (ParticleField). Computed
+//      independent of the writing/holding boundary so the last letter's 1.2 s
+//      window spills into early holding.
+//    - FINALE (VISION §6, WritingClock phases holding→igniting→dissolving): a
+//      ~5 s gold dwell, then the settled ink IGNITES to a random full-saturation
+//      4×–8× HDR hue (FinaleColor, seeded per proverb), then DISSOLVES into
+//      fireworks along the stroke paths while the ink ramps out.
+//    - EMISSIVE PASS: ignited ink + all particles are self-luminous HDR,
+//      composited ADDITIVELY on top of the lit frame — NOT run through the
+//      lighting multiply. This is required by the human directive (2026-08-12):
+//      the 4×–8× HDR values must reach the panel unreduced; the near-dark ambient
+//      would otherwise scale them down. Additive ⇒ the full HDR value is present.
+//
+//  ABSTRACTION LEDGER (this file adds none new): one concrete renderer, called
+//  only by GlyphSaverView; GlyphCore + ParticleField (render-layer sibling) are
+//  the collaborators. The ink/particle vertex buffers are rebuilt PER FRAME;
+//  layouts are cached per (proverb index, world size).
 //
 
 import Metal
@@ -106,11 +128,25 @@ final class ZapRenderer {
 
     // Ink (Hello-style, docs/PLAN.md "Renderer decision"). Tunable at checkpoints.
     private static let inkColor = SIMD3<Float>(0.95, 0.91, 0.82)      // opaque warm cream
-    private static let inkWidthGlyphUnits: Float = 36.0               // ~7.5% of the 480 box
+    // RATIFIED default ink width (do NOT change — operator note 2026-08-12). The
+    // verification path may OVERRIDE it per-frame via
+    // renderFrameSynchronously(into:time:inkWidthGlyphUnits:) to render the
+    // width-comparison PNG; the live saver always uses this value.
+    private static let inkWidthGlyphUnits: Float = 28.0               // ~5.8% of the 480 box; human pick 2026-08-12 (36 closed small 'e' counters — see PLAN)
     private static let inkCapSegments = 12                            // round cap/join facets
     /// Bright pen-tip dot (game.rs:468 fill_circle(pos, 8.0, (0.8,1.2,2.5))).
     private static let penDotColor = SIMD3<Float>(1.1, 1.4, 2.2)
     private static let penDotWidthFactor: Float = 1.35               // × ink half-width
+
+    // Celebration / finale constants (game.rs; VISION §6).
+    private static let celebrateDuration: CGFloat = 1.2              // CELEBRATE_DURATION game.rs:29
+    /// Gold used by BOTH the letter-complete light (game.rs:551) and the
+    /// saying-complete dwell light (game.rs:558): [1.0, 0.85, 0.3].
+    private static let goldLightColor = SIMD3<Float>(1.0, 0.85, 0.3)
+    private static let letterGoldIntensity: Float = 14.0            // i14·t  game.rs:551
+    private static let letterGoldRadius: Float = 350.0             // r350   game.rs:551
+    private static let sayingGoldIntensity: Float = 10.0           // i10·t  game.rs:558
+    private static let sayingGoldRadius: Float = 400.0            // r400   game.rs:558
 
     /// Per-instance schedule seed, drawn from system randomness ONCE in `init`
     /// (see header). Random per session ⇒ a random opening proverb; fixed for the
@@ -124,6 +160,13 @@ final class ZapRenderer {
     private let scenePipeline: MTLRenderPipelineState
     private let inkPipeline: MTLRenderPipelineState
     private let lightingPipeline: MTLRenderPipelineState
+    /// Self-luminous HDR geometry (ignited ink), additively blended on top of the
+    /// lit frame. Per-vertex colour; see Shaders.metal emissive_*.
+    private let emissivePipeline: MTLRenderPipelineState
+    /// Particles (letter-burst sparks + finale dissolve fireworks) as INSTANCED
+    /// quads — one unit-quad geometry per live particle. Shares the emissive
+    /// additive blend + fragment; only the vertex stage differs. See particle_vertex.
+    private let particlePipeline: MTLRenderPipelineState
     private let sampler: MTLSamplerState
 
     private let leather: MTLTexture
@@ -149,7 +192,17 @@ final class ZapRenderer {
         // on a random proverb (GS-3 / VISION §Experience 2). `UInt64.random(in:)`
         // uses SystemRandomNumberGenerator (CSPRNG-seeded) — genuine per-instance
         // randomness, not the old fixed compile-time constant.
-        self.scheduleSeed = UInt64.random(in: UInt64.min ... UInt64.max)
+        //
+        // TESTING SEAM (GS-4): `GLYPHSAVER_SEED`, when set to a UInt64, PINS the
+        // schedule so verify.sh can land offscreen frames on a known celebration /
+        // finale moment (deliverable 6). Unset in the live saver — no behavioural
+        // change to the shipped product.
+        if let env = ProcessInfo.processInfo.environment["GLYPHSAVER_SEED"],
+           let seed = UInt64(env) {
+            self.scheduleSeed = seed
+        } else {
+            self.scheduleSeed = UInt64.random(in: UInt64.min ... UInt64.max)
+        }
         guard let queue = device.makeCommandQueue() else { return nil }
         self.queue = queue
 
@@ -170,6 +223,10 @@ final class ZapRenderer {
               let sceneFn = library.makeFunction(name: "scene_fragment"),
               let inkVfn = library.makeFunction(name: "ink_vertex"),
               let inkFfn = library.makeFunction(name: "ink_fragment"),
+              let emissiveVfn = library.makeFunction(name: "emissive_vertex"),
+              let emissiveFfn = library.makeFunction(name: "emissive_fragment"),
+              let particleVfn = library.makeFunction(name: "particle_vertex"),
+              let particleFfn = library.makeFunction(name: "particle_fragment"),
               let lightFn = library.makeFunction(name: "lighting_fragment") else {
             NSLog("ZapRenderer: missing shader function(s)")
             return nil
@@ -201,10 +258,43 @@ final class ZapRenderer {
         lightPD.vertexFunction = vfn
         lightPD.fragmentFunction = lightFn
         lightPD.colorAttachments[0].pixelFormat = pixelFormat
+        // Emissive pass: ADDITIVE, self-luminous HDR (ignited ink + particles),
+        // composited over the lit frame. The fragment premultiplies rgb by alpha,
+        // so the blend is a plain add (dst.rgb += src.rgb·src.a); the alpha channel
+        // is preserved (target stays opaque). Same target format as the light pass.
+        let emissivePD = MTLRenderPipelineDescriptor()
+        emissivePD.label = "EmissivePass"
+        emissivePD.vertexFunction = emissiveVfn
+        emissivePD.fragmentFunction = emissiveFfn
+        emissivePD.colorAttachments[0].pixelFormat = pixelFormat
+        emissivePD.colorAttachments[0].isBlendingEnabled = true
+        emissivePD.colorAttachments[0].rgbBlendOperation = .add
+        emissivePD.colorAttachments[0].sourceRGBBlendFactor = .one
+        emissivePD.colorAttachments[0].destinationRGBBlendFactor = .one
+        emissivePD.colorAttachments[0].alphaBlendOperation = .add
+        emissivePD.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        emissivePD.colorAttachments[0].destinationAlphaBlendFactor = .one
+        // Particle pass: identical additive HDR blend as the emissive pass, but
+        // its own instanced-quad vertex stage AND its own fragment stage
+        // (particle_fragment adds the radial soft falloff → round sparks).
+        let particlePD = MTLRenderPipelineDescriptor()
+        particlePD.label = "ParticlePass"
+        particlePD.vertexFunction = particleVfn
+        particlePD.fragmentFunction = particleFfn
+        particlePD.colorAttachments[0].pixelFormat = pixelFormat
+        particlePD.colorAttachments[0].isBlendingEnabled = true
+        particlePD.colorAttachments[0].rgbBlendOperation = .add
+        particlePD.colorAttachments[0].sourceRGBBlendFactor = .one
+        particlePD.colorAttachments[0].destinationRGBBlendFactor = .one
+        particlePD.colorAttachments[0].alphaBlendOperation = .add
+        particlePD.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        particlePD.colorAttachments[0].destinationAlphaBlendFactor = .one
         do {
             self.scenePipeline = try device.makeRenderPipelineState(descriptor: scenePD)
             self.inkPipeline = try device.makeRenderPipelineState(descriptor: inkPD)
             self.lightingPipeline = try device.makeRenderPipelineState(descriptor: lightPD)
+            self.emissivePipeline = try device.makeRenderPipelineState(descriptor: emissivePD)
+            self.particlePipeline = try device.makeRenderPipelineState(descriptor: particlePD)
         } catch {
             NSLog("ZapRenderer: pipeline creation failed: \(error)")
             return nil
@@ -297,7 +387,7 @@ final class ZapRenderer {
     /// proverb's totalDuration. Cheap: layouts are cached; only WritingClock is
     /// rebuilt per step, and the walk is O(t / proverb-duration).
     private func scheduled(atAbsolute t: Double, proj: CGSize)
-        -> (layout: ProverbLayout.Layout, clock: WritingClock, local: CGFloat)? {
+        -> (layout: ProverbLayout.Layout, clock: WritingClock, local: CGFloat, index: Int)? {
         guard glyphSet != nil, !sayings.isEmpty else { return nil }
         var seq = ProverbSequence(seed: scheduleSeed)
         var remaining = CGFloat(max(0, t))
@@ -307,11 +397,22 @@ final class ZapRenderer {
             guard let layout = layout(idx, proj: proj) else { return nil }
             let clock = WritingClock(layout: layout)
             if remaining < clock.totalDuration || guardIter > 100_000 {
-                return (layout, clock, max(0, remaining))
+                return (layout, clock, max(0, remaining), idx)
             }
             remaining -= clock.totalDuration
             guardIter += 1
         }
+    }
+
+    /// Per-proverb finale/particle seed: the instance schedule seed mixed with the
+    /// proverb index, so the ignite hue is "seeded per proverb" (VISION §6) yet a
+    /// deterministic function of absolute time (stateless replay). SplitMix64
+    /// finalizer so adjacent indices don't yield adjacent hues.
+    private static func proverbSeed(_ base: UInt64, _ index: Int) -> UInt64 {
+        var z = base ^ (UInt64(bitPattern: Int64(index)) &* 0x9E37_79B9_7F4A_7C15)
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 
     // MARK: - Ink tessellation (world-space triangle strips)
@@ -458,18 +559,25 @@ final class ZapRenderer {
     /// Isolation test seam (verify.sh / thumbnail). Renders one frame into an
     /// arbitrary target and blocks until the GPU finishes. Deterministic: the
     /// schedule is a pure function of `time`. Not used by the live saver's loop.
-    func renderFrameSynchronously(into target: MTLTexture, time: Double) {
+    /// `inkWidthGlyphUnits`: VERIFICATION-ONLY override of the ratified default
+    /// ink width (`Self.inkWidthGlyphUnits`). Reachable only through this
+    /// seam (never the live `newFrame` path), so the shipped default is unchanged.
+    /// Used by verify.sh to render `verify-width28.png` at width 28 for the human
+    /// width-legibility comparison (operator note 2026-08-12); nil ⇒ the default.
+    func renderFrameSynchronously(into target: MTLTexture, time: Double,
+                                  inkWidthGlyphUnits: Float? = nil) {
         let size = CGSize(width: target.width, height: target.height)
         if sceneColor == nil || size != sceneSize { resize(size) }
         guard let cmd = queue.makeCommandBuffer() else { return }
-        encodeFrame(into: target, time: time, cmd: cmd)
+        encodeFrame(into: target, time: time, cmd: cmd, inkWidthOverride: inkWidthGlyphUnits)
         cmd.commit()
         cmd.waitUntilCompleted()
     }
 
     /// Encode the scene pass (offscreen color) and the lighting pass (into
     /// `target`). Single source of pass logic for both entry points.
-    private func encodeFrame(into target: MTLTexture, time: Double, cmd: MTLCommandBuffer) {
+    private func encodeFrame(into target: MTLTexture, time: Double, cmd: MTLCommandBuffer,
+                             inkWidthOverride: Float? = nil) {
         guard let sceneColor = sceneColor else { return }
         let ds = CGSize(width: target.width, height: target.height)
 
@@ -478,27 +586,36 @@ final class ZapRenderer {
         let projSizeF = SIMD2<Float>(Self.worldHeight * aspect, Self.worldHeight)
         let proj = CGSize(width: CGFloat(projSizeF.x), height: CGFloat(projSizeF.y))
 
-        // ---- Resolve this frame's proverb + pen + camera (pure GlyphCore) ----
+        // ---- Resolve this frame's proverb + pen + camera + celebrations/finale
+        //      (all decided by pure GlyphCore + ParticleField) ----
         var inkVerts: [Float] = []
         var penDotVerts: [Float] = []
-        var inkAlpha: Float = 1
+        var creamAlpha: Float = 1                         // settled cream ink alpha (scene buffer)
         var camScale: Float = 1
         var camFocus = SIMD2<Float>(projSizeF.x * 0.5, projSizeF.y * 0.5)
         var lights: [PointLightGPU] = []
+        var goldFloods: [(verts: [Float], color: SIMD4<Float>)] = []   // per celebrating letter
+        var emissiveInkVerts: [Float] = []                // ignited-ink ribbon (triangleStrip)
+        var particleInstances: [ParticleQuad] = []        // burst + dissolve quads (instanced)
 
         if let s = scheduled(atAbsolute: time, proj: proj) {
             let layout = s.layout, clock = s.clock, local = s.local
+            let proverbSeed = Self.proverbSeed(scheduleSeed, s.index)
             let camera = CameraPlan.camera(at: local, layout: layout, clock: clock)
             camScale = Float(camera.scale)
             camFocus = SIMD2<Float>(Float(camera.focus.x), Float(camera.focus.y))
 
-            let halfW = Self.inkWidthGlyphUnits * 0.5 * Float(layout.scale)
+            let halfW = (inkWidthOverride ?? Self.inkWidthGlyphUnits) * 0.5 * Float(layout.scale)
+            // Partial while writing; full (all points inked) once writing ends —
+            // reused as both the cream ink and the ignited-ink geometry.
             let polylines = Self.writingPolylines(layout: layout, clock: clock, local: local)
             inkVerts = Self.tessellatePolylines(polylines, halfW: halfW, capSegments: Self.inkCapSegments)
 
+            var particleQuads: [ParticleQuad] = []
+
             switch clock.phase(at: local) {
             case .writing:
-                inkAlpha = 1
+                creamAlpha = 1
                 if let pen = clock.pen(at: local) {
                     let tip = Self.penTipWorld(layout: layout, pen: pen)
                     penDotVerts = Self.discStrip(center: tip,
@@ -517,13 +634,60 @@ final class ZapRenderer {
                                                  intensity: Self.letterAmbientIntensity,
                                                  radius: Self.letterAmbientRadius * camScale))
                 }
-            case .holding, .done:
-                inkAlpha = 1
-                lights = [holdSweepLight(time: time, proj: projSizeF)]
-            case .fading(let alpha):
-                inkAlpha = Float(alpha)
-                lights = [holdSweepLight(time: time, proj: projSizeF)]
+
+            case .holding:
+                // Admiring gold dwell (game.rs:556-559): [1,0.85,0.3] i10·t r400,
+                // t fading 1→0 across the ~5 s hold. Sweep keeps the leather alive.
+                creamAlpha = 1
+                let holdElapsed = local - clock.writingDuration
+                let t = Float(1 - max(0, min(1, holdElapsed / clock.holdDuration)))
+                let centerV = SIMD2<Float>(projSizeF.x * 0.5, projSizeF.y * 0.5)
+                lights.append(Self.makeLight(pos: CGPoint(x: CGFloat(centerV.x), y: CGFloat(centerV.y)),
+                                             color: Self.goldLightColor,
+                                             intensity: Self.sayingGoldIntensity * t,
+                                             radius: Self.sayingGoldRadius))
+                lights.append(holdSweepLight(time: time, proj: projSizeF))
+
+            case .igniting(let t):
+                // Cross-fade: cream fades out of the scene buffer as the ignited
+                // HDR hue ramps up in the additive emissive pass.
+                let e = Self.smoothstep(Float(t))
+                creamAlpha = 1 - e
+                let ic = FinaleColor.ignite(seed: proverbSeed)
+                let col = SIMD4<Float>(Float(ic.r), Float(ic.g), Float(ic.b), e)
+                emissiveInkVerts = Self.colorizeStrip(inkVerts, color: col)
+                lights.append(holdSweepLight(time: time, proj: projSizeF))
+
+            case .dissolving(let t):
+                // Cream is gone; the ignited HDR ink fades out while fireworks are
+                // emitted along the stroke paths (coloured like the ignited ink).
+                creamAlpha = 0
+                let e = Self.smoothstep(Float(t))
+                let ic = FinaleColor.ignite(seed: proverbSeed)
+                let col = SIMD4<Float>(Float(ic.r), Float(ic.g), Float(ic.b), 1 - e)
+                emissiveInkVerts = Self.colorizeStrip(inkVerts, color: col)
+                particleQuads += ParticleField.dissolveField(layout: layout, clock: clock,
+                                                             local: local, igniteColor: ic,
+                                                             proverbSeed: proverbSeed)
+                lights.append(holdSweepLight(time: time, proj: projSizeF))
+
+            case .done:
+                creamAlpha = 0
+                lights.append(holdSweepLight(time: time, proj: projSizeF))
             }
+
+            // Letter celebrations — computed independent of the writing/holding
+            // boundary so the LAST letter's 1.2 s gold flood + burst spill into
+            // early holding. Empty during the finale (all completions are >1.2 s
+            // in the past), so this is safe to always run.
+            let cel = letterCelebrations(layout: layout, clock: clock, local: local,
+                                         camera: camera)
+            goldFloods.append(contentsOf: cel.floods)
+            lights.append(contentsOf: cel.lights)
+            particleQuads += ParticleField.letterBursts(layout: layout, clock: clock,
+                                                        local: local, proverbSeed: proverbSeed)
+
+            particleInstances = particleQuads
         } else {
             // No glyphs/sayings: background-only, single slow sweep (GS-1 look).
             lights = [holdSweepLight(time: time, proj: projSizeF)]
@@ -544,28 +708,46 @@ final class ZapRenderer {
             enc.setFragmentBytes(&fs, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-            // Ink ribbons (camera-transformed) into the same scene buffer.
+            // Ink ribbons (camera-transformed) into the same scene buffer. All
+            // scene-buffer geometry (cream ink, gold flood, pen dot) shares the
+            // camera uniforms and the ink pipeline.
             var ink = InkUniformsGPU(projSize: projSizeF, focus: camFocus, scale: camScale, pad: 0)
-            if !inkVerts.isEmpty,
+            enc.setRenderPipelineState(inkPipeline)
+            enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
+
+            // Settled cream ink (opaque during writing/hold; faded out during the
+            // finale ignite — the ignited hue is drawn self-luminous later).
+            if creamAlpha > 0, !inkVerts.isEmpty,
                let buf = device.makeBuffer(bytes: inkVerts,
                                            length: inkVerts.count * MemoryLayout<Float>.stride,
                                            options: .storageModeShared) {
-                enc.setRenderPipelineState(inkPipeline)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
-                enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
-                var color = SIMD4<Float>(Self.inkColor.x, Self.inkColor.y, Self.inkColor.z, inkAlpha)
+                var color = SIMD4<Float>(Self.inkColor.x, Self.inkColor.y, Self.inkColor.z, creamAlpha)
                 enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: inkVerts.count / 2)
             }
-            // Bright pen-tip dot (same camera, brighter color).
+
+            // Gold flood ribbons over just-completed letters (game.rs:533-553):
+            // wide golden strokes into the scene buffer, LIT by the gold letter
+            // light in the following pass (game parity — not self-luminous).
+            for flood in goldFloods where !flood.verts.isEmpty {
+                if let buf = device.makeBuffer(bytes: flood.verts,
+                                               length: flood.verts.count * MemoryLayout<Float>.stride,
+                                               options: .storageModeShared) {
+                    enc.setVertexBuffer(buf, offset: 0, index: 0)
+                    var color = flood.color
+                    enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: flood.verts.count / 2)
+                }
+            }
+
+            // Bright pen-tip dot (writing only; same camera, brighter color).
             if !penDotVerts.isEmpty,
                let buf = device.makeBuffer(bytes: penDotVerts,
                                            length: penDotVerts.count * MemoryLayout<Float>.stride,
                                            options: .storageModeShared) {
-                enc.setRenderPipelineState(inkPipeline)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
-                enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
-                var color = SIMD4<Float>(Self.penDotColor.x, Self.penDotColor.y, Self.penDotColor.z, inkAlpha)
+                var color = SIMD4<Float>(Self.penDotColor.x, Self.penDotColor.y, Self.penDotColor.z, 1)
                 enc.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: penDotVerts.count / 2)
             }
@@ -599,6 +781,111 @@ final class ZapRenderer {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
+
+        // ---- Emissive pass → target (LOAD the lit frame, ADD self-luminous HDR).
+        //      Ignited ink (triangle strip) + particles (triangle list), both
+        //      camera-transformed via the ink uniforms. Skipped when there is
+        //      nothing self-luminous this frame (writing/holding with no bursts is
+        //      rare — a burst is almost always active during writing). ----
+        if !emissiveInkVerts.isEmpty || !particleInstances.isEmpty {
+            var ink = InkUniformsGPU(projSize: projSizeF, focus: camFocus, scale: camScale, pad: 0)
+            let emissivePass = MTLRenderPassDescriptor()
+            emissivePass.colorAttachments[0].texture = target
+            emissivePass.colorAttachments[0].loadAction = .load
+            emissivePass.colorAttachments[0].storeAction = .store
+            if let enc = cmd.makeRenderCommandEncoder(descriptor: emissivePass) {
+                enc.label = "EmissivePass"
+                enc.setVertexBytes(&ink, length: MemoryLayout<InkUniformsGPU>.stride, index: 1)
+                // Ignited ink: per-vertex-coloured ribbon (triangle strip).
+                if !emissiveInkVerts.isEmpty,
+                   let buf = device.makeBuffer(bytes: emissiveInkVerts,
+                                               length: emissiveInkVerts.count * MemoryLayout<Float>.stride,
+                                               options: .storageModeShared) {
+                    enc.setRenderPipelineState(emissivePipeline)
+                    enc.setVertexBuffer(buf, offset: 0, index: 0)
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0,
+                                       vertexCount: emissiveInkVerts.count / 6)
+                }
+                // Particles: one INSTANCED unit quad (4-vertex strip) per particle.
+                // ParticleQuad uploads verbatim as the per-instance buffer (layout
+                // matches Shaders.metal ParticleInstance — see that struct).
+                if !particleInstances.isEmpty,
+                   let buf = device.makeBuffer(bytes: particleInstances,
+                                               length: particleInstances.count * MemoryLayout<ParticleQuad>.stride,
+                                               options: .storageModeShared) {
+                    enc.setRenderPipelineState(particlePipeline)
+                    enc.setVertexBuffer(buf, offset: 0, index: 0)
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4,
+                                       instanceCount: particleInstances.count)
+                }
+                enc.endEncoding()
+            }
+        }
+    }
+
+    // MARK: - Celebration + emissive geometry helpers
+
+    /// Gold flood ribbons + gold point lights for every letter currently within
+    /// its 1.2 s celebration window (game.rs:533-553). The gold color and light
+    /// fade with `t = 1 − age/1.2` (game.rs:535: celebrate_timer/CELEBRATE_DURATION,
+    /// which decays 1→0). Flood width is the game's literal `8 + 12·t` glyph units
+    /// (game.rs:538), mapped to the tessellator's world half-width by the SAME
+    /// convention as the cream ink (`widthGlyphUnits · 0.5 · layout.scale`, cf.
+    /// `inkWidthGlyphUnits`). NOTE (review-0): at Hello-fat ink widths the
+    /// 8→20-unit gold reads as a bright gold CORE inside the cream, not an outer
+    /// bloom — that is the game constant applied faithfully; the human owns the
+    /// visual call (a re-scale would be a new ratified decision, not a builder tweak).
+    private func letterCelebrations(layout: ProverbLayout.Layout,
+                                    clock: WritingClock,
+                                    local: CGFloat,
+                                    camera: Camera)
+        -> (floods: [(verts: [Float], color: SIMD4<Float>)], lights: [PointLightGPU]) {
+        var completeByGlyph: [Int: CGFloat] = [:]
+        for s in clock.strokes {
+            completeByGlyph[s.glyphIndex] = max(completeByGlyph[s.glyphIndex] ?? 0, s.endTime)
+        }
+        var floods: [(verts: [Float], color: SIMD4<Float>)] = []
+        var lights: [PointLightGPU] = []
+        let camScale = Float(camera.scale)
+        for (gi, complete) in completeByGlyph {
+            let age = local - complete
+            guard age >= 0, age < Self.celebrateDuration else { continue }
+            let t = Float(1 - age / Self.celebrateDuration)         // 1 → 0 (game.rs:535)
+            let floodWidthGlyphUnits = 8 + 12 * t                   // game.rs:538 (8 + 12·t)
+            let floodHalfW = floodWidthGlyphUnits * 0.5 * Float(layout.scale)
+            let verts = Self.tessellatePolylines(layout.glyphs[gi].strokes,
+                                                 halfW: floodHalfW,
+                                                 capSegments: Self.inkCapSegments)
+            let gold = SIMD4<Float>(8 * t, 6.8 * t, 2.4 * t, 1)     // game.rs:536
+            floods.append((verts, gold))
+            let centerV = camera.project(layout.glyphs[gi].center)
+            lights.append(Self.makeLight(pos: centerV, color: Self.goldLightColor,
+                                         intensity: Self.letterGoldIntensity * t,
+                                         radius: Self.letterGoldRadius * camScale))   // game.rs:551
+        }
+        return (floods, lights)
+    }
+
+    /// Attach a uniform per-vertex colour to a plain [x,y,…] strip → the emissive
+    /// format [x, y, r, g, b, a] the emissive_vertex shader reads (6 floats/vert).
+    private static func colorizeStrip(_ xy: [Float], color c: SIMD4<Float>) -> [Float] {
+        guard xy.count >= 2 else { return [] }
+        var out: [Float] = []
+        out.reserveCapacity(xy.count / 2 * 6)
+        var i = 0
+        while i + 1 < xy.count {
+            out.append(xy[i]); out.append(xy[i + 1])
+            out.append(c.x); out.append(c.y); out.append(c.z); out.append(c.w)
+            i += 2
+        }
+        return out
+    }
+
+    /// Smoothstep on [0,1] (matches CameraPlan's easing); used to ease the finale
+    /// ignite/dissolve ramps so the cross-fades start and end gently.
+    private static func smoothstep(_ x: Float) -> Float {
+        let c = max(0, min(1, x))
+        return c * c * (3 - 2 * c)
     }
 
     private static func makeLight(pos: CGPoint, color: SIMD3<Float>,
@@ -610,7 +897,7 @@ final class ZapRenderer {
         return l
     }
 
-    /// Gentle non-repeating Lissajous guide sweep for hold/fade/background so the
+    /// Gentle non-repeating Lissajous guide sweep for hold/finale/background so the
     /// scene never freezes (VISION §3). Two nearly-incommensurate low frequencies.
     private func holdSweepLight(time: Double, proj: SIMD2<Float>) -> PointLightGPU {
         let t = Float(time)

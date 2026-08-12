@@ -23,25 +23,34 @@ final class WritingClockTests: XCTestCase {
                                  viewport: CGSize(width: 960, height: 600))
     }
 
-    // MARK: Phase machine — exact boundaries (game.rs:26/31, VISION §6)
+    // MARK: Phase machine — exact FINALE boundaries (VISION §6 / PLAN GS-4)
 
     func testPhaseTransitions_atExactBoundaries() throws {
         let clock = try WritingClock(layout: realLayout())
         let w = clock.writingDuration
         let h = clock.holdDuration
-        let f = clock.fadeDuration
+        let ig = clock.igniteDuration
+        let di = clock.dissolveDuration
         XCTAssertGreaterThan(w, 0)
-        XCTAssertEqual(h, 12, accuracy: 1e-9)   // SAYING_CELEBRATE_DURATION game.rs:31
-        XCTAssertEqual(f, 1,  accuracy: 1e-9)
+        // Ratified finale durations (VISION §6, superseding game.rs:31's 12 s dwell).
+        XCTAssertEqual(h,  5,   accuracy: 1e-9)
+        XCTAssertEqual(ig, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(di, 2.5, accuracy: 1e-9)
+        XCTAssertEqual(clock.totalDuration, w + h + ig + di, accuracy: 1e-9)
 
         // Left-half-open boundaries: exactly at a boundary the NEXT phase holds.
         XCTAssertEqual(clock.phase(at: w - 1e-4), .writing)
-        XCTAssertEqual(clock.phase(at: w),         .holding)
-        XCTAssertEqual(clock.phase(at: w + h - 1e-4), .holding)
-        XCTAssertEqual(clock.phase(at: w + h),        .fading(alpha: 1))
-        XCTAssertEqual(clock.phase(at: w + h + f/2),  .fading(alpha: 0.5))
-        XCTAssertEqual(clock.phase(at: w + h + f - 1e-6).isFading, true)
-        XCTAssertEqual(clock.phase(at: w + h + f),    .done)
+        XCTAssertEqual(clock.phase(at: w),                 .holding)
+        XCTAssertEqual(clock.phase(at: w + h - 1e-4),      .holding)
+        // igniting: t ramps 0→1 across [w+h, w+h+ig).
+        XCTAssertEqual(clock.phase(at: w + h),             .igniting(t: 0))
+        XCTAssertEqual(clock.phase(at: w + h + ig/2),      .igniting(t: 0.5))
+        XCTAssertEqual(clock.phase(at: w + h + ig - 1e-6).isIgniting, true)
+        // dissolving: t ramps 0→1 across [w+h+ig, w+h+ig+di).
+        XCTAssertEqual(clock.phase(at: w + h + ig),        .dissolving(t: 0))
+        XCTAssertEqual(clock.phase(at: w + h + ig + di/2), .dissolving(t: 0.5))
+        XCTAssertEqual(clock.phase(at: w + h + ig + di - 1e-6).isDissolving, true)
+        XCTAssertEqual(clock.phase(at: w + h + ig + di),   .done)
         XCTAssertEqual(clock.phase(at: clock.totalDuration + 100), .done)
     }
 
@@ -186,5 +195,6 @@ final class WritingClockTests: XCTestCase {
 }
 
 private extension WritingClock.Phase {
-    var isFading: Bool { if case .fading = self { return true }; return false }
+    var isIgniting: Bool { if case .igniting = self { return true }; return false }
+    var isDissolving: Bool { if case .dissolving = self { return true }; return false }
 }

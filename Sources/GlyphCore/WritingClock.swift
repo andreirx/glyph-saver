@@ -15,7 +15,9 @@
 //      travelled along the currently-active stroke;
 //    - the ordered stroke timeline (authored order within a letter, letters in
 //      reading order);
-//    - the phase of the per-proverb lifecycle: writing → holding → fading → done.
+//    - the phase of the per-proverb lifecycle. GS-4 replaces the bare
+//      writing → holding → fading → done tail with the ratified FINALE
+//      (VISION §6 / PLAN GS-4): writing → holding → igniting → dissolving → done.
 //  ProverbSequence adds uniform-random, never-immediately-repeating proverb
 //  selection over a seedable RNG.
 //
@@ -25,10 +27,13 @@
 //      are EVENLY spaced, so a constant points/second rate is a constant
 //      arc-length speed. This is the ONE named speed constant
 //      (`guideSpeedPointsPerSecond`).
-//    - SAYING_CELEBRATE_DURATION = 12 s dwell (game.rs:31) → `holdDurationSeconds`.
-//    - Fade to the next proverb = 1 s (VISION §6 "then fade, next proverb");
-//      the game's inter-letter TRANSITION_DURATION is player-driven and not the
-//      reference here → `fadeDurationSeconds`.
+//    - The FINALE dwell/ignite/dissolve durations are VISION §6 / PLAN GS-4, NOT
+//      the game's SAYING_CELEBRATE_DURATION (12 s). VISION §6 supersedes that
+//      static 12 s dwell (recorded human field observation: the long static hold
+//      read dull) with a ~5 s admiring dwell followed by the ignite→dissolve
+//      finale — a deliberate divergence from the game, whose saying-complete is
+//      only a dwell light. `holdDurationSeconds` (5) / `igniteDurationSeconds`
+//      (1.5) / `dissolveDurationSeconds` (2.5) are those ratified constants.
 //
 //  DEVIATION from the game's state machine (recorded): the game is
 //  PLAYER-driven — its `guide_time` is a looping *hint* animation
@@ -36,8 +41,7 @@
 //  human traces. The saver has no player: the pen writes autonomously at
 //  GUIDE_SPEED, once, straight through every stroke in order. So this is NOT a
 //  port of `GamePhase`; it is the saver's own writer timeline, using only the
-//  game's *pacing constants*. GS-4's letter/saying celebrations are out of scope
-//  (this slice's phases are writing → holding → fading → done only).
+//  game's *pacing constants* for writing and its own ratified finale afterwards.
 //
 //  ABSTRACTION LEDGER:
 //    - `WritingClock` (struct): the per-proverb timeline. Users: ZapRenderer +
@@ -46,8 +50,10 @@
 //      recomputing stroke offsets ad hoc in the renderer (untestable, duplicated
 //      in CameraPlan).
 //    - `Phase` (enum): mutually-exclusive lifecycle states, each carrying only
-//      its valid data (fade carries alpha) — the domain-modeling rule. Fixed
-//      variants, growing match sites → sum type + exhaustive switch.
+//      its valid data (igniting/dissolving carry their own 0→1 progress) — the
+//      domain-modeling rule. Fixed variants, growing match sites → sum type +
+//      exhaustive switch. Adding a finale phase deliberately breaks every switch
+//      (the ZapRenderer phase switch is the site that must react — the feature).
 //    - `ProverbSequence` + `SplitMix64`: a seedable deterministic RNG is
 //      REQUIRED by the deliverable ("seedable RNG for tests") and by the
 //      renderer's need to reproduce the same schedule for a given absolute time.
@@ -119,10 +125,12 @@ public struct ProverbSequence: Sendable {
 
 public struct WritingClock: Sendable {
 
-    // Named pacing constants (game.rs) — the ONLY timing knobs.
-    public static let guideSpeedPointsPerSecond: CGFloat = 60   // GUIDE_SPEED         game.rs:26
-    public static let holdDurationSeconds: CGFloat = 12         // SAYING_CELEBRATE    game.rs:31
-    public static let fadeDurationSeconds: CGFloat = 1          // VISION §6 fade-to-next
+    // Named pacing constants — the ONLY timing knobs.
+    public static let guideSpeedPointsPerSecond: CGFloat = 60   // GUIDE_SPEED  game.rs:26
+    // FINALE durations (VISION §6 / PLAN GS-4, superseding game.rs:31's 12 s dwell).
+    public static let holdDurationSeconds: CGFloat = 5          // admiring gold dwell
+    public static let igniteDurationSeconds: CGFloat = 1.5      // cream → HDR hue ramp
+    public static let dissolveDurationSeconds: CGFloat = 2.5    // ink-out + fireworks (2–3 s band)
 
     /// One drawable stroke placed in the writing timeline. Only strokes with ≥2
     /// points appear (a 0/1-point stroke has no arc length to animate and no
@@ -147,30 +155,42 @@ public struct WritingClock: Sendable {
         public let pointPosition: CGFloat  // in [0, pointCount − 1]
     }
 
-    /// Per-proverb lifecycle. Mutually-exclusive; fading carries its own alpha.
+    /// Per-proverb lifecycle (VISION §6 finale). Mutually-exclusive; the two
+    /// finale ramps each carry ONLY their own 0→1 progress:
+    ///   - `writing`  — the pen is drawing.
+    ///   - `holding`  — the ~5 s admiring gold dwell.
+    ///   - `igniting` — `t` ∈ [0,1] across the ignite ramp (cream → HDR hue).
+    ///   - `dissolving` — `t` ∈ [0,1] across the dissolve (ink-out + fireworks).
+    ///   - `done`     — finished; the schedule moves to the next proverb.
     public enum Phase: Sendable, Equatable {
         case writing
         case holding
-        case fading(alpha: CGFloat)   // 1 → 0 across `fadeDuration`
+        case igniting(t: CGFloat)
+        case dissolving(t: CGFloat)
         case done
     }
 
     public let strokes: [StrokeRef]     // authored order; letters in reading order
     public let speed: CGFloat
     public let holdDuration: CGFloat
-    public let fadeDuration: CGFloat
+    public let igniteDuration: CGFloat
+    public let dissolveDuration: CGFloat
     /// Wall-clock seconds to write every stroke (0 for a proverb with no ink).
     public let writingDuration: CGFloat
 
-    public var totalDuration: CGFloat { writingDuration + holdDuration + fadeDuration }
+    public var totalDuration: CGFloat {
+        writingDuration + holdDuration + igniteDuration + dissolveDuration
+    }
 
     public init(layout: ProverbLayout.Layout,
                 speed: CGFloat = guideSpeedPointsPerSecond,
                 holdDuration: CGFloat = holdDurationSeconds,
-                fadeDuration: CGFloat = fadeDurationSeconds) {
+                igniteDuration: CGFloat = igniteDurationSeconds,
+                dissolveDuration: CGFloat = dissolveDurationSeconds) {
         self.speed = max(speed, 0.0001)
         self.holdDuration = holdDuration
-        self.fadeDuration = fadeDuration
+        self.igniteDuration = max(igniteDuration, 0.0001)
+        self.dissolveDuration = max(dissolveDuration, 0.0001)
 
         var refs: [StrokeRef] = []
         var t: CGFloat = 0
@@ -189,13 +209,19 @@ public struct WritingClock: Sendable {
 
     /// Phase at `elapsed` (seconds since this proverb began). Boundaries are
     /// half-open on the left: exactly at `writingDuration` the phase is
-    /// `.holding` (writing is finished), etc.
+    /// `.holding` (writing is finished); exactly at the hold end it is
+    /// `.igniting(t: 0)`; exactly at the ignite end it is `.dissolving(t: 0)`.
     public func phase(at elapsed: CGFloat) -> Phase {
         if elapsed < writingDuration { return .writing }
-        if elapsed < writingDuration + holdDuration { return .holding }
-        if elapsed < totalDuration {
-            let f = (elapsed - writingDuration - holdDuration) / fadeDuration
-            return .fading(alpha: max(0, min(1, 1 - f)))
+        let afterWrite = elapsed - writingDuration
+        if afterWrite < holdDuration { return .holding }
+        let afterHold = afterWrite - holdDuration
+        if afterHold < igniteDuration {
+            return .igniting(t: max(0, min(1, afterHold / igniteDuration)))
+        }
+        let afterIgnite = afterHold - igniteDuration
+        if afterIgnite < dissolveDuration {
+            return .dissolving(t: max(0, min(1, afterIgnite / dissolveDuration)))
         }
         return .done
     }
@@ -210,7 +236,7 @@ public struct WritingClock: Sendable {
     }
 
     /// The pen during writing, or `nil` once writing is finished (holding/
-    /// fading/done) or when there is no ink. The active stroke is the last one
+    /// igniting/dissolving/done) or when there is no ink. The active stroke is the last one
     /// whose `startTime ≤ elapsed`; strokes are contiguous so there are no gaps.
     public func pen(at elapsed: CGFloat) -> Pen? {
         guard !strokes.isEmpty, elapsed < writingDuration else { return nil }
