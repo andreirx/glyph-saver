@@ -119,17 +119,31 @@ glyph-saver/
 
 ## Test hosts (one engine, two shells — decided 2026-08-11)
 
-The renderer + core are host-agnostic; only the CAMetalLayer's owner varies:
-- **Saver host** (`GlyphSaverView`) — the product; exercised by
-  `scripts/smoke.sh` through the REAL path (install → defaults → launch
-  `ScreenSaverEngine` → `screencapture` ×2 → frames must differ). This is
-  the acceptance surface.
-- **Preview app host** (`Sources/PreviewApp/main.swift`, tracked; built by
-  `scripts/preview.sh` into `build/`) — the same renderer in an NSWindow
-  for live watching and fast screenshot iteration. A dev tool, never
-  shipped in the bundle, and never a substitute for the smoke gate (cycle-0
-  lesson: the builder's improvised harness proved the need; the reviewer
-  correctly rejected it as acceptance evidence).
+The renderer + core are host-agnostic; only the CAMetalLayer's owner varies.
+
+**Automated engine-capture is IMPOSSIBLE on this machine** (verified
+2026-08-11, ratified 2026-08-12): direct exec of `ScreenSaverEngine` is
+SIGKILLed by macOS 26 launch constraints (CODESIGNING violation, crash
+reports on file), and the LaunchServices route (`open -a`) is dismissed by
+ANY human input — with the human at the Mac, automated full-screen capture
+is nondeterministic by construction. (This confounded cycle-1: the builder's
+"dismissed during capture" and the operator's early probes were the human's
+own mouse. The bundle itself is sound — verified by in-process load.)
+
+The ratified **layered acceptance** (each layer covers what the previous
+cannot):
+1. `scripts/loadtest` (gate, automated) — loads the INSTALLED bundle
+   in-process and instantiates the principal class via
+   `initWithFrame:isPreview:` — the engine's exact dyld/class/init path.
+2. Offscreen frames (gate, automated) — render N frames through the REAL
+   `GlyphSaverView` (not a renderer-only harness) into `build/*.png`;
+   frames must differ; the operator reviews them visually each checkpoint.
+3. Human glance (checkpoint cadence) — System Settings → Screen Saver →
+   "Other" (the `legacyScreenSaver.appex` sandbox) and the real idle-time
+   run: the only surfaces automation cannot reach.
+- **Preview app host** (`Sources/PreviewApp/main.swift`, tracked, lands
+  GS-2) — the same renderer in an NSWindow for live watching. Dev tool,
+  never shipped, never acceptance evidence.
 Install stays per-user (`~/Library/Screen Savers`); `/Library/Screen
 Savers` (all users) only when a real need appears.
 
