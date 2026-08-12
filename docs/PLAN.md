@@ -19,8 +19,11 @@ not re-open its decisions.
 - Deployment target `arm64-apple-macos14`, arm64-only (v1, this machine).
 - macOS 26 hosts third-party savers via `legacyScreenSaver`; after each
   install: `killall legacyScreenSaver ScreenSaverEngine`.
-- Display: built-in panel `maximumPotentialEDR = 1.0` (no HDR headroom).
-  Pipeline is still built EDR-ready (see renderer).
+- Display: built-in panel is XDR — `maximumPotentialEDR = 16.0` under the
+  XDR preset (corrected 2026-08-12; an earlier 1.0 reading reflected the
+  web/sRGB display preset, not the panel — display presets gate EDR
+  headroom, a probe caveat worth remembering). The EDR pipeline displays
+  true HDR on this machine.
 
 ## Renderer decision (amended)
 

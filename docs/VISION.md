@@ -118,9 +118,12 @@ From `examples/glypher/src/{glyphs.rs, game.rs}`:
    Fallback knob (recorded, not built): quick fade-to-black if the
    dissolve disappoints at checkpoint.
 7. Identical on every attached screen; scaled down in System Settings preview.
-8. EDR: the surface is EDR-capable; on this machine's panel (verified
-   `maximumPotentialEDR = 1.0`) output is tone-limited SDR today — an XDR
-   display gets real headroom with no code change.
+8. EDR: the surface is EDR-capable and the panel is a real XDR display —
+   `maximumPotentialEDR = 16.0` (corrected 2026-08-12: the earlier 1.0
+   reading was taken with the display in its web/sRGB preset, which
+   disables headroom — the probe measured the profile, not the panel; the
+   human verified colors pop under the XDR preset). HDR content in the
+   4×–8× finale range displays as true HDR.
 
 ## Constraints
 
