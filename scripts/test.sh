@@ -20,4 +20,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-exec env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test "$@"
+# PORTABILITY (2026-08-17): resolve a toolchain that carries XCTest instead of
+# hardcoding this machine's Xcode path. Order: explicit $DEVELOPER_DIR wins;
+# else the xcode-selected dir IF it is a full Xcode (has Platforms/ — the CLT
+# does not); else the conventional /Applications/Xcode.app; else fail loudly.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+    sel="$(xcode-select -p 2>/dev/null || true)"
+    if [ -n "$sel" ] && [ -d "$sel/Platforms" ]; then
+        DEVELOPER_DIR="$sel"
+    elif [ -d "/Applications/Xcode.app/Contents/Developer/Platforms" ]; then
+        DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    else
+        echo "ERROR: 'swift test' needs a full Xcode toolchain (XCTest); the" >&2
+        echo "Command Line Tools alone are not enough. Install Xcode, or set" >&2
+        echo "DEVELOPER_DIR to a full Xcode's Contents/Developer." >&2
+        exit 1
+    fi
+fi
+
+exec env DEVELOPER_DIR="$DEVELOPER_DIR" swift test "$@"
